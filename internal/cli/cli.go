@@ -16,8 +16,9 @@ func ParseCmdline() *config.Config {
 
 	dockerhost := pflag.StringP("docker", "d", "unix://var/run/docker.sock", "Docker socket")
 	consulhost := pflag.StringP("consul", "c", "localhost:8500", "Consul host:port")
+	tags := pflag.StringToStringP("tags", "t", nil, "Tags to listen to for registering containers (key=value). Can be specified multiple times.")
+	shouldRegister := pflag.BoolP("register", "r", true, "Register all running containers on startup")
 
 	pflag.Parse()
-	return config.NewConfig(*dockerhost, *consulhost)
-
+	return config.NewConfig(*dockerhost, *consulhost, *shouldRegister, *tags)
 }
