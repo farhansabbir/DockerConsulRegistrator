@@ -8,17 +8,29 @@ import (
 	"github.com/spf13/pflag"
 )
 
-func ParseCmdline() *config.Config {
+var (
+	DockerHost    *string
+	ConsulHost    *string
+	ListenForTags *map[string]string
+	DoNotRegister bool
+)
+
+func ParseCmdline() {
 	pflag.Usage = func() {
 		fmt.Println("Usage: " + os.Args[0] + " [options]")
 		pflag.PrintDefaults()
 	}
 
-	dockerhost := pflag.StringP("docker", "d", "unix://var/run/docker.sock", "Docker socket")
-	consulhost := pflag.StringP("consul", "c", "localhost:8500", "Consul host:port")
-	tags := pflag.StringToStringP("tags", "t", nil, "Tags to listen to for registering containers (key=value). Can be specified multiple times.")
-	shouldRegister := pflag.BoolP("register", "r", true, "Register all running containers on startup")
+	DockerHost = pflag.StringP("docker", "d", "unix://var/run/docker.sock", "Docker socket")
+	ConsulHost = pflag.StringP("consul", "c", "localhost:8500", "Consul host:port")
+	ListenForTags = pflag.StringToStringP("tags", "t", nil, "Tags to listen to for registering containers (key=value). Can be specified multiple times.")
+	pflag.BoolVarP(&DoNotRegister, "ignore", "i", false, "Ignore and do not register containers. Only listen for tags.")
 
 	pflag.Parse()
-	return config.NewConfig(*dockerhost, *consulhost, *shouldRegister, *tags)
+	tags := *ListenForTags
+	if tags == nil {
+		tags = make(map[string]string)
+		*ListenForTags = tags
+	}
+	config.NewConfig(*DockerHost, *ConsulHost, DoNotRegister, *ListenForTags)
 }
