@@ -23,13 +23,14 @@ func ParseCmdline() {
 
 	DockerHost = pflag.StringP("docker", "d", "unix://var/run/docker.sock", "Docker socket")
 	ConsulHost = pflag.StringP("consul", "c", "localhost:8500", "Consul host:port")
-	ListenForTags = pflag.StringToStringP("tags", "t", nil, "Tags to listen to for registering containers (key=value). Can be specified multiple times.")
+	ListenForTags = pflag.StringToStringP("tags", "t", nil, "Tags to listen to for registering containers (consul_registrator=true is default).")
 	pflag.BoolVarP(&DoNotRegister, "ignore", "i", false, "Ignore and do not register containers. Only listen for tags.")
 
 	pflag.Parse()
 	tags := *ListenForTags
 	if tags == nil {
 		tags = make(map[string]string)
+		tags["consul_registrator"] = "true"
 		*ListenForTags = tags
 	}
 	config.NewConfig(*DockerHost, *ConsulHost, DoNotRegister, *ListenForTags)
