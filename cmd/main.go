@@ -1,14 +1,12 @@
 package main
 
 import (
-	"fmt"
-
 	"github.com/farhansabbir/docker_consul_registrator/internal/cli"
-	"github.com/farhansabbir/docker_consul_registrator/internal/config"
+	"github.com/farhansabbir/docker_consul_registrator/internal/container"
 )
 
 func main() {
 
 	cli.ParseCmdline()
-	fmt.Println(config.GetConfig())
+	container.LookForContainers()
 }

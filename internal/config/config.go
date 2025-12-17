@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"sync"
+
+	"github.com/docker/docker/client"
 )
 
 var (
@@ -11,7 +13,7 @@ var (
 )
 
 type Config struct {
-	DockerHost              string            `json:"docker_host"`
+	DockerClient            *client.Client    `json:"-"`
 	ConsulHost              string            `json:"consul_host"`
 	ListenForTagsToRegister map[string]string `json:"listen_for_tags_to_register,omitempty"`
 	DoNotRegister           bool              `json:"do_not_register"`
@@ -20,7 +22,6 @@ type Config struct {
 func NewConfig(dockerHost, consulHost string, doNotRegister bool, listenForTags ...map[string]string) *Config {
 	once.Do(func() {
 		cfg = &Config{
-			DockerHost:    dockerHost,
 			ConsulHost:    consulHost,
 			DoNotRegister: doNotRegister,
 			ListenForTagsToRegister: func() map[string]string {
@@ -36,6 +37,11 @@ func NewConfig(dockerHost, consulHost string, doNotRegister bool, listenForTags 
 
 func GetConfig() *Config {
 	return cfg
+}
+
+func (conf *Config) SetDockerClient(dockerClient *client.Client) *Config {
+	conf.DockerClient = dockerClient
+	return conf
 }
 
 func (c *Config) String() string {
