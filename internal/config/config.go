@@ -2,9 +2,15 @@ package config
 
 import (
 	"encoding/json"
+	"log/slog"
 	"sync"
 
 	"github.com/docker/docker/client"
+)
+
+const (
+	APP_NAME   = "DockerConsulRegistrator"
+	CACHE_FILE = "cache.db"
 )
 
 var (
@@ -12,11 +18,17 @@ var (
 	cfg  *Config
 )
 
+type Status struct {
+	RegisteredContainers map[string]string `json:"registered_containers"`
+	LastUpdated          int64             `json:"last_updated"`
+}
+
 type Config struct {
 	DockerClient            *client.Client    `json:"-"`
 	ConsulHost              string            `json:"consul_host"`
 	ListenForTagsToRegister map[string]string `json:"listen_for_tags_to_register,omitempty"`
 	DoNotRegister           bool              `json:"do_not_register"`
+	Logger                  *slog.Logger      `json:"-"`
 }
 
 func NewConfig(dockerHost, consulHost string, doNotRegister bool, listenForTags ...map[string]string) *Config {
@@ -24,6 +36,7 @@ func NewConfig(dockerHost, consulHost string, doNotRegister bool, listenForTags 
 		cfg = &Config{
 			ConsulHost:    consulHost,
 			DoNotRegister: doNotRegister,
+			Logger:        slog.Default(),
 			ListenForTagsToRegister: func() map[string]string {
 				if len(listenForTags) > 0 {
 					return listenForTags[0]

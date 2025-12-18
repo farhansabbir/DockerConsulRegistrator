@@ -1,4 +1,4 @@
-module github.com/farhansabbir/docker_consul_registrator
+module github.com/farhansabbir/DockerConsulRegistrator
 
 go 1.25.5
 

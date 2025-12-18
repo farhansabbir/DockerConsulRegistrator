@@ -1,12 +1,11 @@
 package main
 
 import (
-	"github.com/farhansabbir/docker_consul_registrator/internal/cli"
-	"github.com/farhansabbir/docker_consul_registrator/internal/container"
+	"github.com/farhansabbir/DockerConsulRegistrator/internal/cli"
+	"github.com/farhansabbir/DockerConsulRegistrator/internal/container"
 )
 
 func main() {
-
 	cli.ParseCmdline()
 	container.LookForContainers()
 }

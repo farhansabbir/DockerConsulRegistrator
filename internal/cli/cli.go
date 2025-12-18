@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/farhansabbir/docker_consul_registrator/internal/config"
+	"github.com/farhansabbir/DockerConsulRegistrator/internal/config"
 	"github.com/spf13/pflag"
 )
 
