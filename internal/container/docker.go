@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -20,6 +21,7 @@ var (
 	logger       *slog.Logger
 	once         sync.Once
 	WG           *sync.WaitGroup = &sync.WaitGroup{}
+	SwarmMode    bool            = false
 )
 
 func _init() {
@@ -43,6 +45,15 @@ func _init() {
 	}
 	js, _ := json.MarshalIndent(stat, "", "  ")
 	logger.Info(string(js))
+	info, err := dockerClient.Info(context.Background())
+	if err != nil {
+		logger.Error("Failed to get Docker info", "error", err)
+		os.Exit(1)
+	}
+	if info.Swarm.LocalNodeState == "active" {
+		SwarmMode = true
+	}
+	logger.Info("Docker Swarm mode", "enabled", SwarmMode)
 }
 
 func _loop() {
@@ -64,28 +75,37 @@ func _loop() {
 		defer WG.Done()
 		event_filters := filters.NewArgs()
 		event_filters.Add("type", "container")
-		event_filters.Add("event", "start")
-		event_filters.Add("event", "stop")
-		event_filters.Add("event", "die")
 		event_filters.Add("event", "running")
-		cont, err := dockerClient.ContainerList(context.Background(), container.ListOptions{})
+		containers, err := dockerClient.ContainerList(context.Background(), container.ListOptions{})
 		if err != nil {
 			logger.Error("Failed to list Docker containers", "error", err)
 		} else {
 			logger.Info("Currently running containers")
-			for _, c := range cont {
-				logger.Info("Container", "ID", c.ID, "Names", c.Names, "Image", c.Image, "State", c.State, "Status", c.Status)
+			for _, container := range containers {
+				// logger.Info("Container", "ID", container.ID, "Names", container.Names, "Image", container.Image, "State", container.State, "Status", container.Labels)
+				fmt.Println(GetContainerDetails(container.ID))
 			}
 		}
-		evt, _ := dockerClient.Events(context.Background(), events.ListOptions{
+
+		event_filters = filters.NewArgs()
+		event_filters.Add("type", "container")
+		event_filters.Add("event", "start")
+		event_filters.Add("event", "stop")
+		events, _ := dockerClient.Events(context.Background(), events.ListOptions{
 			Filters: event_filters,
 		})
 
-		for event := range evt {
+		for event := range events {
 			logger.Info("Received Docker event", "action", event.Action, "id", event.Actor.ID)
+			if event.Action == "stop" {
+				fmt.Println("Container stopped:", event.Actor.ID)
+				continue
+			}
+			fmt.Println(GetContainerDetails(event.Actor.ID))
+			// fmt.Println("Container started:", details)
 			// Handle the event (e.g., update cache, register/deregister container)
 		}
-
+		fmt.Println("Out!!!")
 	}()
 
 }
