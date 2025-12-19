@@ -18,11 +18,6 @@ var (
 	cfg  *Config
 )
 
-type Status struct {
-	RegisteredContainers map[string]string `json:"registered_containers"`
-	LastUpdated          int64             `json:"last_updated"`
-}
-
 type Config struct {
 	DockerClient            *client.Client    `json:"-"`
 	ConsulHost              string            `json:"consul_host"`
@@ -36,7 +31,7 @@ func NewConfig(dockerHost, consulHost string, doNotRegister bool, listenForTags 
 		cfg = &Config{
 			ConsulHost:    consulHost,
 			DoNotRegister: doNotRegister,
-			Logger:        slog.Default(),
+			Logger:        slog.Default().With(),
 			ListenForTagsToRegister: func() map[string]string {
 				if len(listenForTags) > 0 {
 					return listenForTags[0]
