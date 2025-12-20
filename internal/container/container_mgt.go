@@ -12,11 +12,11 @@ import (
 )
 
 var (
-	mutex  sync.Mutex
-	status *Status
+	mutex      sync.Mutex
+	containerQ *ContainerQueue
 )
 
-type Status struct {
+type ContainerQueue struct {
 	runningContainers map[string]ContainerDetails `json:"-"`
 	LastUpdated       int64                       `json:"last_updated"`
 }
@@ -26,22 +26,21 @@ type ContainerDetails struct {
 	ContainerName string                `json:"container_name"`
 	ServiceName   string                `json:"service_name"`
 	Image         string                `json:"image"`
-	Tags          []string              `json:"tags,omitempty"`
+	Labels        []string              `json:"labels,omitempty"`
 	PortMap       map[nat.Port][]string `json:"container_port_map,omitempty"`
 	CreatedAt     int64                 `json:"created_at"`
 }
 
-func NewStatus() *Status {
+func GetContainerQueue() *ContainerQueue {
 	once.Do(func() {
-		status = &Status{
+		containerQ = &ContainerQueue{
 			runningContainers: make(map[string]ContainerDetails),
 		}
 	})
-
-	return status
+	return containerQ
 }
 
-func (status *Status) AddContainerToCache(containerID string) {
+func (status *ContainerQueue) AddContainerToCache(containerID string) {
 	mutex.Lock()
 	dt := time.Now().UnixMilli()
 	defer mutex.Unlock()
@@ -53,14 +52,14 @@ func (status *Status) AddContainerToCache(containerID string) {
 	}
 }
 
-func (status *Status) RemoveContainerFromCache(containerID string) {
+func (status *ContainerQueue) RemoveContainerFromCache(containerID string) {
 	mutex.Lock()
 	defer mutex.Unlock()
 	delete(status.runningContainers, containerID)
 	status.LastUpdated = time.Now().UnixMilli()
 }
 
-func (status *Status) ContainerExistsInCache(containerID string) bool {
+func (status *ContainerQueue) ContainerExistsInCache(containerID string) bool {
 	mutex.Lock()
 	defer mutex.Unlock()
 	_, exists := status.runningContainers[containerID]
@@ -68,16 +67,16 @@ func (status *Status) ContainerExistsInCache(containerID string) bool {
 }
 
 func GetContainerDetails(containerID string) (*ContainerDetails, error) {
-	mutex.Lock()
-	defer mutex.Unlock()
+	// mutex.Lock()
+	// defer mutex.Unlock()
 	portMap := make(map[nat.Port][]string)
 	containerJSON, err := dockerClient.ContainerInspect(context.Background(), containerID)
 	servicename := ""
+
 	if err != nil {
 		logger.Error("Failed to inspect container", "container_id", containerID, "error", err)
 		return nil, err
 	}
-
 	servicename = containerJSON.Name[1:] // Remove leading slash
 
 	for port, bindings := range containerJSON.NetworkSettings.Ports {
@@ -125,6 +124,10 @@ func GetContainerDetails(containerID string) (*ContainerDetails, error) {
 	}
 	t, _ := time.Parse(time.RFC3339Nano, containerJSON.Created)
 	details.CreatedAt = t.UnixMilli()
+	details.Labels = []string{}
+	for key, value := range containerJSON.Config.Labels {
+		details.Labels = append(details.Labels, fmt.Sprintf("%s=%s", key, value))
+	}
 	return details, nil
 }
 

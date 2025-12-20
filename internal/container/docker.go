@@ -80,13 +80,11 @@ func _loop() {
 		if err != nil {
 			logger.Error("Failed to list Docker containers", "error", err)
 		} else {
-			logger.Info("Currently running containers")
 			for _, container := range containers {
-				// logger.Info("Container", "ID", container.ID, "Names", container.Names, "Image", container.Image, "State", container.State, "Status", container.Labels)
-				fmt.Println(GetContainerDetails(container.ID))
+				GetContainerQueue().AddContainerToCache(container.ID)
 			}
 		}
-
+		logger.Info("Cached running containers: " + fmt.Sprint(len(GetContainerQueue().runningContainers)))
 		event_filters = filters.NewArgs()
 		event_filters.Add("type", "container")
 		event_filters.Add("event", "start")
@@ -102,12 +100,8 @@ func _loop() {
 				continue
 			}
 			fmt.Println(GetContainerDetails(event.Actor.ID))
-			// fmt.Println("Container started:", details)
-			// Handle the event (e.g., update cache, register/deregister container)
 		}
-		fmt.Println("Out!!!")
 	}()
-
 }
 
 func LookForContainers() {
