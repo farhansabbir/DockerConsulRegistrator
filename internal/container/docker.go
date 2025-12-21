@@ -60,9 +60,10 @@ func _loop() {
 	// Placeholder for the main loop logic to monitor Docker containers
 	logger.Info("Starting container monitoring loop...")
 	WG.Go(func() {
-		event_filters := filters.NewArgs()
-		event_filters.Add("type", "container")
-		event_filters.Add("event", "running")
+		event_filters := filters.NewArgs(
+			filters.Arg("type", "container"),
+			filters.Arg("event", "running"),
+		)
 		containers, err := dockerClient.ContainerList(context.Background(), container.ListOptions{})
 		if err != nil {
 			logger.Error("Failed to list Docker containers", "error", err)
@@ -76,10 +77,11 @@ func _loop() {
 			}
 		}
 		logger.Info("Cached running containers: " + fmt.Sprint(len(GetContainerQueue().RunningContainers)))
-		event_filters = filters.NewArgs()
-		event_filters.Add("type", "container")
-		event_filters.Add("event", "start")
-		event_filters.Add("event", "die")
+		event_filters = filters.NewArgs(
+			filters.Arg("type", "container"),
+			filters.Arg("event", "start"),
+			filters.Arg("event", "die"),
+		)
 		events, _ := dockerClient.Events(context.Background(), events.ListOptions{
 			Filters: event_filters,
 		})
