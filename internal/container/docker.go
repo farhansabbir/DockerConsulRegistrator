@@ -57,22 +57,9 @@ func _init() {
 }
 
 func _loop() {
-	cache_file, err := os.Open(config.CACHE_FILE)
-	if err != nil {
-		logger.Warn("Could not open cache file", "error", err)
-		cache_file, err = os.Create(config.CACHE_FILE)
-		if err != nil {
-			logger.Error("Could not create cache file", "error", err)
-			panic(err)
-		}
-		logger.Info("Created new cache file", "file", config.CACHE_FILE)
-	}
-	defer cache_file.Close()
 	// Placeholder for the main loop logic to monitor Docker containers
 	logger.Info("Starting container monitoring loop...")
-	WG.Add(1)
-	go func() {
-		defer WG.Done()
+	WG.Go(func() {
 		event_filters := filters.NewArgs()
 		event_filters.Add("type", "container")
 		event_filters.Add("event", "running")
@@ -80,11 +67,15 @@ func _loop() {
 		if err != nil {
 			logger.Error("Failed to list Docker containers", "error", err)
 		} else {
-			for _, container := range containers {
-				GetContainerQueue().AddContainerToCache(container.ID)
+			if len(containers) == 0 {
+				logger.Info("No running containers found during initialization.")
+			} else {
+				for _, container := range containers {
+					GetContainerQueue().AddContainerToCache(container.ID)
+				}
 			}
 		}
-		logger.Info("Cached running containers: " + fmt.Sprint(len(GetContainerQueue().runningContainers)))
+		logger.Info("Cached running containers: " + fmt.Sprint(len(GetContainerQueue().RunningContainers)))
 		event_filters = filters.NewArgs()
 		event_filters.Add("type", "container")
 		event_filters.Add("event", "start")
@@ -101,11 +92,10 @@ func _loop() {
 			}
 			GetContainerQueue().AddContainerToCache(event.Actor.ID)
 		}
-	}()
+	})
 }
 
 func LookForContainers(ctx context.Context) {
 	_init()
 	_loop()
-	// WG.Wait()
 }

@@ -17,7 +17,7 @@ var (
 )
 
 type ContainerQueue struct {
-	runningContainers map[string]ContainerDetails `json:"-"`
+	RunningContainers map[string]ContainerDetails `json:"-"`
 	LastUpdated       int64                       `json:"last_updated"`
 }
 
@@ -34,7 +34,8 @@ type ContainerDetails struct {
 func GetContainerQueue() *ContainerQueue {
 	once.Do(func() {
 		containerQ = &ContainerQueue{
-			runningContainers: make(map[string]ContainerDetails),
+			RunningContainers: make(map[string]ContainerDetails),
+			LastUpdated:       time.Now().UnixMilli(),
 		}
 	})
 	return containerQ
@@ -45,7 +46,7 @@ func (status *ContainerQueue) AddContainerToCache(containerID string) {
 	dt := time.Now().UnixMilli()
 	defer mutex.Unlock()
 	if containerdetails, err := GetContainerDetails(containerID); err == nil {
-		status.runningContainers[containerID] = *containerdetails
+		status.RunningContainers[containerID] = *containerdetails
 		status.LastUpdated = dt
 	} else {
 		logger.Error("Could not add container to cache", "container_id", containerID, "error", err)
@@ -55,14 +56,14 @@ func (status *ContainerQueue) AddContainerToCache(containerID string) {
 func (status *ContainerQueue) RemoveContainerFromCache(containerID string) {
 	mutex.Lock()
 	defer mutex.Unlock()
-	delete(status.runningContainers, containerID)
+	delete(status.RunningContainers, containerID)
 	status.LastUpdated = time.Now().UnixMilli()
 }
 
 func (status *ContainerQueue) ContainerExistsInCache(containerID string) bool {
 	mutex.Lock()
 	defer mutex.Unlock()
-	_, exists := status.runningContainers[containerID]
+	_, exists := status.RunningContainers[containerID]
 	return exists
 }
 
@@ -71,7 +72,7 @@ func (status *ContainerQueue) GetRunningContainers() map[string]ContainerDetails
 	defer mutex.Unlock()
 	// Return a copy to avoid race conditions
 	copyMap := make(map[string]ContainerDetails)
-	for k, v := range status.runningContainers {
+	for k, v := range status.RunningContainers {
 		copyMap[k] = v
 	}
 	return copyMap
