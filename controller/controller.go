@@ -39,16 +39,16 @@ func StartController() {
 		processQueue(ctx) // Your other background operation
 	}()
 
-	fmt.Println("Controller is running. Press Ctrl+C to stop.")
+	logger.Info("Controller is running. Press Ctrl+C to stop.")
 
 	// 4. Wait for the context to be canceled (when a signal is received)
 	<-ctx.Done()
 
-	fmt.Println("\nShutdown signal received. Cleaning up...")
+	logger.Info("Shutdown signal received. Cleaning up...")
 
 	// 5. Wait for goroutines to finish their current work
 	wg.Wait()
-	fmt.Println("Controller stopped gracefully.")
+	logger.Info("Controller stopped gracefully.")
 }
 
 func processQueue(ctx context.Context) {
@@ -56,7 +56,7 @@ func processQueue(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("Queue processor stopping...")
+			logger.Info("Queue processor stopping...")
 			return
 		case <-time.After(config.RefreshIntervalSeconds * time.Second):
 			// Check the queue and take actions here
