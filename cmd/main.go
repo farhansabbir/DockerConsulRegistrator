@@ -7,6 +7,6 @@ import (
 
 func main() {
 	cli.ParseCmdline()
-	controller.StartController()
+	controller.Start()
 
 }

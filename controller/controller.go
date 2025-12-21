@@ -15,12 +15,14 @@ import (
 )
 
 var (
-	wg     *sync.WaitGroup = &sync.WaitGroup{}
-	logger *slog.Logger
+	wg         *sync.WaitGroup = &sync.WaitGroup{}
+	logger     *slog.Logger
+	cache_file *os.File
+	err        error
 )
 
-func StartController() {
-	logger = config.GetConfig().Logger
+func Start() {
+	logger = config.GetConfig().Logger.With("logger", "controller")
 	// 1. Create a context that listens for Ctrl+C (SIGINT) or SIGTERM
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -64,5 +66,18 @@ func processQueue(ctx context.Context) {
 			// Check the queue and take actions here
 			logger.Info("Cache last updated", "duration", fmt.Sprintf("%v", time.Since(time.UnixMilli(q.LastUpdated))), "total_containers", len(q.GetRunningContainers()))
 		}
+	}
+}
+
+func cache_file_init() {
+	cache_file, err = os.Open(config.CACHE_FILE)
+	if err != nil {
+		logger.Warn("Could not open cache file", "error", err)
+		cache_file, err = os.Create(config.CACHE_FILE)
+		if err != nil {
+			logger.Error("Could not create cache file", "error", err)
+			panic(err)
+		}
+		logger.Info("Created new cache file", "file", config.CACHE_FILE)
 	}
 }

@@ -25,7 +25,7 @@ var (
 )
 
 func _init() {
-	logger = config.GetConfig().Logger
+	logger = config.GetConfig().Logger.With("logger", "container")
 	logger.Info("Initializing Docker client from environment...")
 
 	dockerClient, err = client.NewClientWithOpts(
@@ -57,17 +57,6 @@ func _init() {
 }
 
 func _loop() {
-	cache_file, err := os.Open(config.CACHE_FILE)
-	if err != nil {
-		logger.Warn("Could not open cache file", "error", err)
-		cache_file, err = os.Create(config.CACHE_FILE)
-		if err != nil {
-			logger.Error("Could not create cache file", "error", err)
-			panic(err)
-		}
-		logger.Info("Created new cache file", "file", config.CACHE_FILE)
-	}
-	defer cache_file.Close()
 	// Placeholder for the main loop logic to monitor Docker containers
 	logger.Info("Starting container monitoring loop...")
 	WG.Add(1)
@@ -107,5 +96,4 @@ func _loop() {
 func LookForContainers(ctx context.Context) {
 	_init()
 	_loop()
-	// WG.Wait()
 }
