@@ -88,24 +88,24 @@ func _loop() {
 		event_filters = filters.NewArgs()
 		event_filters.Add("type", "container")
 		event_filters.Add("event", "start")
-		event_filters.Add("event", "stop")
+		event_filters.Add("event", "die")
 		events, _ := dockerClient.Events(context.Background(), events.ListOptions{
 			Filters: event_filters,
 		})
 
 		for event := range events {
-			logger.Info("Received Docker event", "action", event.Action, "id", event.Actor.ID)
-			if event.Action == "stop" {
-				fmt.Println("Container stopped:", event.Actor.ID)
+			logger.Info("'"+string(event.Action)+"' Event:", "id", event.Actor.ID)
+			if event.Action == "die" {
+				GetContainerQueue().RemoveContainerFromCache(event.Actor.ID)
 				continue
 			}
-			fmt.Println(GetContainerDetails(event.Actor.ID))
+			GetContainerQueue().AddContainerToCache(event.Actor.ID)
 		}
 	}()
 }
 
-func LookForContainers() {
+func LookForContainers(ctx context.Context) {
 	_init()
 	_loop()
-	WG.Wait()
+	// WG.Wait()
 }

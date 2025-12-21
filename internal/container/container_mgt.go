@@ -66,6 +66,17 @@ func (status *ContainerQueue) ContainerExistsInCache(containerID string) bool {
 	return exists
 }
 
+func (status *ContainerQueue) GetRunningContainers() map[string]ContainerDetails {
+	mutex.Lock()
+	defer mutex.Unlock()
+	// Return a copy to avoid race conditions
+	copyMap := make(map[string]ContainerDetails)
+	for k, v := range status.runningContainers {
+		copyMap[k] = v
+	}
+	return copyMap
+}
+
 func GetContainerDetails(containerID string) (*ContainerDetails, error) {
 	// mutex.Lock()
 	// defer mutex.Unlock()
