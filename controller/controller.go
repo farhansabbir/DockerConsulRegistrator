@@ -20,12 +20,10 @@ var (
 )
 
 func StartController() {
-	logger = config.GetConfig().Logger
+	logger = config.GetConfig().Logger.With("logger", "controller")
 	// 1. Create a context that listens for Ctrl+C (SIGINT) or SIGTERM
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	var wg sync.WaitGroup
 
 	// 2. Start Docker Monitoring (Pass the context!)
 	wg.Add(1)
@@ -60,7 +58,7 @@ func processQueue(ctx context.Context) {
 		case <-ctx.Done():
 			fmt.Println("Queue processor stopping...")
 			return
-		case <-time.After(15 * time.Second):
+		case <-time.After(config.RefreshIntervalSeconds * time.Second):
 			// Check the queue and take actions here
 			logger.Info("Cache last updated", "duration", fmt.Sprintf("%v", time.Since(time.UnixMilli(q.LastUpdated))), "total_containers", len(q.GetRunningContainers()))
 		}

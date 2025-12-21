@@ -25,7 +25,7 @@ var (
 )
 
 func _init() {
-	logger = config.GetConfig().Logger
+	logger = config.GetConfig().Logger.With("logger", "container")
 	logger.Info("Initializing Docker client from environment...")
 
 	dockerClient, err = client.NewClientWithOpts(

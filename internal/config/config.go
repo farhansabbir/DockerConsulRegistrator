@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	APP_NAME   = "DockerConsulRegistrator"
-	CACHE_FILE = "cache.db"
+	APP_NAME               = "DockerConsulRegistrator"
+	CACHE_FILE             = "cache.db"
+	RefreshIntervalSeconds = 10
 )
 
 var (
