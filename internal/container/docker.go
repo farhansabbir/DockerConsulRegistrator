@@ -57,6 +57,8 @@ func _init() {
 }
 
 func _loop() {
+	// Load existing container cache from file
+
 	// Placeholder for the main loop logic to monitor Docker containers
 	logger.Info("Starting container monitoring loop...")
 	WG.Go(func() {
@@ -76,7 +78,8 @@ func _loop() {
 				}
 			}
 		}
-		logger.Info("Cached running containers: " + fmt.Sprint(len(GetContainerQueue().RunningContainers)))
+		ReconcileContainerQueue()
+		logger.Info("Final cached running containers: " + fmt.Sprint(len(GetContainerQueue().RunningContainers)))
 		event_filters = filters.NewArgs(
 			filters.Arg("type", "container"),
 			filters.Arg("event", "start"),

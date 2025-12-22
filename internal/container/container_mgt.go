@@ -2,23 +2,31 @@ package container
 
 import (
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/go-connections/nat"
+	"github.com/farhansabbir/DockerConsulRegistrator/internal/config"
 )
 
 var (
 	mutex      sync.Mutex
-	containerQ *ContainerQueue
+	containerQ *RunningContainerQueue
 )
 
-type ContainerQueue struct {
+type RunningContainerQueue struct {
 	RunningContainers map[string]ContainerDetails `json:"-"`
 	LastUpdated       int64                       `json:"last_updated"`
+}
+
+type DeadContainerQueue struct {
+	DeadContainers []string `json:"dead_containers"`
+	LastUpdated    int64    `json:"last_updated"`
 }
 
 type ContainerDetails struct {
@@ -31,9 +39,9 @@ type ContainerDetails struct {
 	CreatedAt     int64                 `json:"created_at"`
 }
 
-func GetContainerQueue() *ContainerQueue {
+func GetContainerQueue() *RunningContainerQueue {
 	once.Do(func() {
-		containerQ = &ContainerQueue{
+		containerQ = &RunningContainerQueue{
 			RunningContainers: make(map[string]ContainerDetails),
 			LastUpdated:       time.Now().UnixMilli(),
 		}
@@ -41,7 +49,29 @@ func GetContainerQueue() *ContainerQueue {
 	return containerQ
 }
 
-func (status *ContainerQueue) AddContainerToCache(containerID string) {
+func ReconcileContainerQueue() {
+	mutex.Lock()
+	defer mutex.Unlock()
+	tempq := &RunningContainerQueue{}
+	fileData, err := os.OpenFile(config.CACHE_FILE, os.O_RDONLY, 0660)
+	if err != nil {
+		logger.Error("Could not open cache file", "error", err)
+		return
+	}
+	defer fileData.Close()
+	decoder := gob.NewDecoder(fileData)
+	err = decoder.Decode(&tempq)
+	if err != nil {
+		logger.Error("Could not decode cache file", "error", err)
+		return
+	}
+	logger.Info("Beginning to reconcile container cache loaded from file", "total_containers", len(tempq.RunningContainers))
+	for containerID, _ := range tempq.RunningContainers {
+		fmt.Println(containerID)
+	}
+}
+
+func (status *RunningContainerQueue) AddContainerToCache(containerID string) {
 	mutex.Lock()
 	dt := time.Now().UnixMilli()
 	defer mutex.Unlock()
@@ -53,21 +83,21 @@ func (status *ContainerQueue) AddContainerToCache(containerID string) {
 	}
 }
 
-func (status *ContainerQueue) RemoveContainerFromCache(containerID string) {
+func (status *RunningContainerQueue) RemoveContainerFromCache(containerID string) {
 	mutex.Lock()
 	defer mutex.Unlock()
 	delete(status.RunningContainers, containerID)
 	status.LastUpdated = time.Now().UnixMilli()
 }
 
-func (status *ContainerQueue) ContainerExistsInCache(containerID string) bool {
+func (status *RunningContainerQueue) ContainerExistsInCache(containerID string) bool {
 	mutex.Lock()
 	defer mutex.Unlock()
 	_, exists := status.RunningContainers[containerID]
 	return exists
 }
 
-func (status *ContainerQueue) GetRunningContainers() map[string]ContainerDetails {
+func (status *RunningContainerQueue) GetRunningContainers() map[string]ContainerDetails {
 	mutex.Lock()
 	defer mutex.Unlock()
 	// Return a copy to avoid race conditions
