@@ -66,7 +66,7 @@ func ReconcileContainerQueue() {
 		return
 	}
 	logger.Info("Beginning to reconcile container cache loaded from file", "total_containers", len(tempq.RunningContainers))
-	for containerID, _ := range tempq.RunningContainers {
+	for containerID := range tempq.RunningContainers {
 		fmt.Println(containerID)
 	}
 }
