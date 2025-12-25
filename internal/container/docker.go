@@ -99,9 +99,9 @@ func _loop() {
 					logger.Info("Container not found in cache during removal", "container_id", event.Actor.ID)
 					continue
 				}
-
+			} else {
+				GetContainerQueue().AddContainerToCache(event.Actor.ID)
 			}
-			GetContainerQueue().AddContainerToCache(event.Actor.ID)
 		}
 	})
 }

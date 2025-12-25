@@ -36,14 +36,19 @@ func (status *RunningContainerQueue) AddContainerToCache(containerID string) {
 	mutex.Lock()
 	dt := time.Now().UnixMilli()
 	defer mutex.Unlock()
-	status.RunningContainers = append(status.RunningContainers, containerID)
-	status.LastUpdated = dt
+	if status.indexNoLock(containerID) != -1 {
+		// Already exists
+		return
+	} else {
+		status.RunningContainers = append(status.RunningContainers, containerID)
+		status.LastUpdated = dt
+	}
 }
 
 func (status *RunningContainerQueue) RemoveContainerFromCache(containerID string) bool {
 	mutex.Lock()
 	defer mutex.Unlock()
-	if exists, idx := status.ContainerExistsInCache(containerID); exists {
+	if idx := status.indexNoLock(containerID); idx != -1 {
 		status.RunningContainers = append(status.RunningContainers[:idx], status.RunningContainers[idx+1:]...)
 		status.LastUpdated = time.Now().UnixMilli()
 		return true
@@ -56,6 +61,11 @@ func (status *RunningContainerQueue) ContainerExistsInCache(containerID string) 
 	defer mutex.Unlock()
 	index := slices.Index(status.RunningContainers, containerID)
 	return index != -1, index
+}
+
+func (status *RunningContainerQueue) indexNoLock(containerID string) int {
+	index := slices.Index(status.RunningContainers, containerID)
+	return index
 }
 
 func (status *RunningContainerQueue) GetRunningContainers() []string {
