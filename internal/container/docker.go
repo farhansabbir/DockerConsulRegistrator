@@ -92,8 +92,14 @@ func _loop() {
 		for event := range events {
 			logger.Info("'"+string(event.Action)+"' Event:", "id", event.Actor.ID)
 			if event.Action == "die" {
-				GetContainerQueue().RemoveContainerFromCache(event.Actor.ID)
-				continue
+				if GetContainerQueue().RemoveContainerFromCache(event.Actor.ID) {
+					logger.Info("Container removed from cache", "container_id", event.Actor.ID)
+					continue
+				} else {
+					logger.Info("Container not found in cache during removal", "container_id", event.Actor.ID)
+					continue
+				}
+
 			}
 			GetContainerQueue().AddContainerToCache(event.Actor.ID)
 		}
