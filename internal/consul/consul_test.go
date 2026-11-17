@@ -181,3 +181,27 @@ func TestKV(t *testing.T) {
 		t.Fatalf("requests:\n%s\nwant:\n%s", strings.Join(seen, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+func TestATokenGivenAsItIs(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Consul-Token")
+		_, _ = fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	c, err := New(Options{Addr: srv.URL, Token: "from-env"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Self(context.Background()); err != nil || got != "from-env" {
+		t.Fatalf("token sent: %q, %v", got, err)
+	}
+}
+
+func TestServersUnreachable(t *testing.T) {
+	down := fmt.Errorf("consul: /v1/agent/self: %w: Permission denied: token with AccessorID 'primary-dc-down' lacks permission 'agent:read'", ErrDenied)
+	real := fmt.Errorf("consul: /v1/agent/self: %w: Permission denied: token with AccessorID '3f2a...' lacks permission 'agent:read'", ErrDenied)
+	if !ServersUnreachable(down) || ServersUnreachable(real) || ServersUnreachable(nil) {
+		t.Fatal("ServersUnreachable tells them apart wrongly")
+	}
+}

@@ -23,15 +23,17 @@ import (
 
 // Agent is how to start the agent.
 type Agent struct {
-	Bin        string
-	ConfigDirs []string
-	DataDir    string
-	Node       string     // its node name
-	Bind       netip.Addr // the address it gossips on and advertises
-	IPv6       netip.Addr // the node's IPv6 address, for its AAAA answers
-	Domain     string     // the DNS domain it serves; "consul" stays its alternative
-	Stdout     io.Writer
-	Stderr     io.Writer
+	Bin         string
+	ConfigDirs  []string
+	ConfigFiles []string // read after ConfigDirs: what they set wins
+	DataDir     string
+	Node        string     // its node name
+	Bind        netip.Addr // the address it gossips on and advertises
+	IPv6        netip.Addr // the node's IPv6 address, for its AAAA answers
+	Domain      string     // the DNS domain it serves; "consul" stays its alternative
+	Env         []string   // its environment; nil: the registrator's
+	Stdout      io.Writer
+	Stderr      io.Writer
 }
 
 // Args are the agent's command line.
@@ -39,6 +41,9 @@ func (a Agent) Args() []string {
 	args := []string{"agent", "-data-dir=" + a.DataDir}
 	for _, d := range a.ConfigDirs {
 		args = append(args, "-config-dir="+d)
+	}
+	for _, f := range a.ConfigFiles {
+		args = append(args, "-config-file="+f)
 	}
 	if a.Node != "" {
 		args = append(args, "-node="+a.Node)
@@ -75,6 +80,7 @@ func (a Agent) Start() (*Process, error) {
 	}
 	cmd := exec.Command(a.Bin, a.Args()...)
 	cmd.Stdout, cmd.Stderr = a.Stdout, a.Stderr
+	cmd.Env = a.Env
 	cmd.SysProcAttr = sysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("the Consul agent: %w", err)

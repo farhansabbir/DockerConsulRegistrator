@@ -1,8 +1,9 @@
-// Package config is what the registrator runs with: the command line's
-// values, checked.
+// Package config is what the registrator runs with - from its command line
+// and its environment - checked before anything starts.
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -19,9 +20,9 @@ import (
 
 // The check modes.
 const (
-	CheckAuto = "auto" // the container's HEALTHCHECK as a TTL check when it has one, else TCP
+	CheckAuto = "auto" // the container's health check as a TTL check when it has one, else TCP
 	CheckTCP  = "tcp"  // TCP to the published port (no check for UDP)
-	CheckTTL  = "ttl"  // a TTL check from Docker: its health, or running
+	CheckTTL  = "ttl"  // a TTL check from the runtime: its health, or running
 	CheckNone = "none" // no check
 )
 
@@ -37,15 +38,58 @@ const (
 // runtimes keep them.
 const SocketAuto = "auto"
 
+// Env is the environment variable of each flag that has one: a flag on the
+// command line wins over its variable. Where Consul has a name of its own
+// (CONSUL_HTTP_ADDR, CONSUL_CACERT...), it is that one.
+var Env = map[string]string{
+	"socket":               "REGISTRATOR_SOCKET",
+	"runtime":              "REGISTRATOR_RUNTIME",
+	"containerd-namespace": "REGISTRATOR_CONTAINERD_NAMESPACE",
+	"label":                "REGISTRATOR_LABEL",
+	"tags":                 "REGISTRATOR_TAGS",
+	"address":              "REGISTRATOR_ADDRESS",
+	"check":                "REGISTRATOR_CHECK",
+	"check-interval":       "REGISTRATOR_CHECK_INTERVAL",
+	"deregister-after":     "REGISTRATOR_DEREGISTER_AFTER",
+	"resync":               "REGISTRATOR_RESYNC",
+	"ignore":               "REGISTRATOR_DRY_RUN",
+	"debug":                "REGISTRATOR_DEBUG",
+	"agent":                "REGISTRATOR_AGENT",
+	"consul":               "CONSUL_HTTP_ADDR",
+	"token-file":           "CONSUL_HTTP_TOKEN_FILE",
+	"ca-file":              "CONSUL_CACERT",
+	"cert-file":            "CONSUL_CLIENT_CERT",
+	"key-file":             "CONSUL_CLIENT_KEY",
+	"domain":               "CONSUL_DOMAIN",
+	"join":                 "CONSUL_RETRY_JOIN",
+	"datacenter":           "CONSUL_DATACENTER",
+	"agent-node":           "CONSUL_NODE_NAME",
+	"agent-bind":           "CONSUL_BIND_ADDR",
+	"encrypt-file":         "CONSUL_ENCRYPT_FILE",
+	"agent-token-file":     "CONSUL_AGENT_TOKEN_FILE",
+	"dns-token-file":       "CONSUL_DNS_TOKEN_FILE",
+}
+
+// Name is how an error names a setting: its variable and its flag.
+func Name(flag string) string {
+	if e, ok := Env[flag]; ok {
+		return e + " (--" + flag + ")"
+	}
+	return "--" + flag
+}
+
 // Config holds the registrator's settings.
 type Config struct {
 	Socket              string // SocketAuto, a path, unix:///path or tcp://host:port
 	Runtime             string // RuntimeAuto or the one behind Socket
 	ContainerdNamespace string
+	LabelKey            string // what marks what is registered: LabelKey=LabelValue
+	LabelValue          string
 	Consul              string // host:port, http://host:port or https://host:port
 	Domain              string // the DNS domain Consul serves the services in
 
-	TokenFile string // the Consul ACL token, read from a file only
+	TokenFile string // the registrator's ACL token, read from this file...
+	Token     string // ...or given in CONSUL_HTTP_TOKEN. Secret: never logged.
 	CAFile    string
 	CertFile  string
 	KeyFile   string
@@ -65,14 +109,31 @@ type Config struct {
 	AgentDataDir    string
 	AgentNode       string
 	AgentBind       string
+	// AgentConfigFound is whether AgentConfigDirs hold configuration files:
+	// then the agent is configured there, and need not be from here.
+	AgentConfigFound bool
+
+	// The bundled agent's settings, written into its configuration.
+	Join        []string
+	Datacenter  string
+	LocalConfig string // more configuration, a JSON object (CONSUL_LOCAL_CONFIG)
+	// Its secrets, from the environment or a file. Never logged.
+	EncryptFile    string
+	AgentTokenFile string
+	DNSTokenFile   string
+	Encrypt        string
+	AgentToken     string
+	DNSToken       string
 }
 
-// Default is the configuration with no flags given.
+// Default is the configuration with nothing given.
 func Default() Config {
 	return Config{
 		Socket:              SocketAuto,
 		Runtime:             RuntimeAuto,
 		ContainerdNamespace: "default",
+		LabelKey:            "consul",
+		LabelValue:          "yes",
 		Consul:              "127.0.0.1:8500",
 		Check:               CheckAuto,
 		CheckInterval:       10 * time.Second,
@@ -84,7 +145,25 @@ func Default() Config {
 	}
 }
 
-// Validate is what is wrong with c, or nil.
+var (
+	// namespaceRE is a containerd namespace, as containerd checks them.
+	namespaceRE  = regexp.MustCompile(`^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$`)
+	labelKeyRE   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
+	labelValueRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+	// datacenterRE is a Consul datacenter's name, as Consul checks them.
+	datacenterRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+)
+
+// ParseLabel reads --label: KEY=VALUE.
+func ParseLabel(s string) (key, value string, err error) {
+	key, value, ok := strings.Cut(s, "=")
+	if !ok || !labelKeyRE.MatchString(key) || !labelValueRE.MatchString(value) {
+		return "", "", fmt.Errorf("%q is not KEY=VALUE: a key of letters, digits, dots, slashes, hyphens and underscores, and a value of letters, digits, dots, hyphens and underscores", safe.Short(s, 80))
+	}
+	return key, value, nil
+}
+
+// Validate is everything wrong with c, or nil.
 func (c *Config) Validate() error {
 	var errs []error
 	bad := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
@@ -92,45 +171,51 @@ func (c *Config) Validate() error {
 	if c.Socket != SocketAuto {
 		network, _, err := Endpoint(c.Socket)
 		if err != nil {
-			bad("--socket: %v", err)
+			bad("%s: %v", Name("socket"), err)
 		} else if network != "unix" && c.Runtime == RuntimeContainerd {
-			bad("--socket: containerd listens on a Unix socket only")
+			bad("%s: containerd listens on a Unix socket only", Name("socket"))
 		}
 	}
 	switch c.Runtime {
 	case RuntimeAuto, RuntimeDocker, RuntimePodman, RuntimeContainerd:
 	default:
-		bad("--runtime: %q is not auto, docker, podman or containerd", safe.Short(c.Runtime, 20))
+		bad("%s: %q is not auto, docker, podman or containerd", Name("runtime"), safe.Short(c.Runtime, 20))
 	}
 	if !namespaceRE.MatchString(c.ContainerdNamespace) {
-		bad("--containerd-namespace: %q is not a namespace name", safe.Short(c.ContainerdNamespace, 70))
+		bad("%s: %q is not a namespace name", Name("containerd-namespace"), safe.Short(c.ContainerdNamespace, 70))
+	}
+	if !labelKeyRE.MatchString(c.LabelKey) || !labelValueRE.MatchString(c.LabelValue) {
+		bad("%s: %q is not KEY=VALUE", Name("label"), safe.Short(c.LabelKey+"="+c.LabelValue, 80))
 	}
 	if c.Domain != "" && !DomainOK(c.Domain) {
-		bad("--domain: %q is not a DNS domain: lowercase labels of letters, digits and hyphens, no dot at the end", safe.Short(c.Domain, 80))
+		bad("%s: %q is not a DNS domain: lowercase labels of letters, digits and hyphens, no dot at the end", Name("domain"), safe.Short(c.Domain, 80))
 	}
 	u, err := ConsulURL(c.Consul)
 	if err != nil {
-		bad("--consul: %v", err)
+		bad("%s: %v", Name("consul"), err)
 	}
 	if (c.CertFile == "") != (c.KeyFile == "") {
-		bad("--cert-file and --key-file go together")
+		bad("%s and %s go together", Name("cert-file"), Name("key-file"))
 	}
 	if u != nil && u.Scheme != "https" && (c.CAFile != "" || c.CertFile != "") {
-		bad("--ca-file, --cert-file and --key-file need an https:// --consul")
+		bad("%s, %s and %s need an https:// %s", Name("ca-file"), Name("cert-file"), Name("key-file"), Name("consul"))
+	}
+	if c.Token != "" && c.TokenFile != "" {
+		bad("CONSUL_HTTP_TOKEN and %s are both set: set one", Name("token-file"))
 	}
 	if len(c.Tags) > 64 {
-		bad("--tags: %d tags, 64 at most", len(c.Tags))
+		bad("%s: %d tags, 64 at most", Name("tags"), len(c.Tags))
 	}
 	for _, t := range c.Tags {
 		if !safe.TagOK(t) {
-			bad("--tags: %q is not a tag: 1 to 255 printable ASCII characters, no space or comma", safe.Short(t, 40))
+			bad("%s: %q is not a tag: 1 to 255 printable ASCII characters, no space or comma", Name("tags"), safe.Short(t, 40))
 		}
 	}
 	var v4, v6 int
 	for _, s := range c.Addresses {
 		a, err := netip.ParseAddr(s)
 		if err != nil || a.Zone() != "" || a.IsUnspecified() || a.IsMulticast() || a.IsLoopback() || a.Is4In6() {
-			bad("--address: %q is not an address other hosts can reach", safe.Short(s, 60))
+			bad("%s: %q is not an address other hosts can reach", Name("address"), safe.Short(s, 60))
 			continue
 		}
 		if a.Is4() {
@@ -140,52 +225,97 @@ func (c *Config) Validate() error {
 		}
 	}
 	if v4 > 1 || v6 > 1 {
-		bad("--address: one IPv4 and one IPv6 address at most")
+		bad("%s: one IPv4 and one IPv6 address at most", Name("address"))
 	}
 	switch c.Check {
 	case CheckAuto, CheckTCP, CheckTTL, CheckNone:
 	default:
-		bad("--check: %q is not auto, tcp, ttl or none", safe.Short(c.Check, 20))
+		bad("%s: %q is not auto, tcp, ttl or none", Name("check"), safe.Short(c.Check, 20))
 	}
 	if c.CheckInterval < time.Second || c.CheckInterval > time.Hour {
-		bad("--check-interval: %v is not between 1s and 1h", c.CheckInterval)
+		bad("%s: %v is not between 1s and 1h", Name("check-interval"), c.CheckInterval)
 	}
 	if c.DeregisterAfter != 0 && (c.DeregisterAfter < time.Minute || c.DeregisterAfter > 7*24*time.Hour) {
-		bad("--deregister-after: %v is not 0 or between 1m (Consul's least) and 168h", c.DeregisterAfter)
+		bad("%s: %v is not 0 or between 1m (Consul's least) and 168h", Name("deregister-after"), c.DeregisterAfter)
 	}
 	if c.Resync < 5*time.Second || c.Resync > 24*time.Hour {
-		bad("--resync: %v is not between 5s and 24h", c.Resync)
+		bad("%s: %v is not between 5s and 24h", Name("resync"), c.Resync)
 	}
 	if c.Agent {
-		if !filepath.IsAbs(c.AgentBin) {
-			bad("--agent-bin: %q is not an absolute path", safe.Short(c.AgentBin, 60))
-		}
-		if len(c.AgentConfigDirs) == 0 {
-			bad("--agent-config-dir: none given")
-		}
-		for _, d := range c.AgentConfigDirs {
-			if !filepath.IsAbs(d) {
-				bad("--agent-config-dir: %q is not an absolute path", safe.Short(d, 60))
+		errs = append(errs, c.validateAgent(u)...)
+	} else {
+		for _, s := range []struct {
+			flag string
+			set  bool
+		}{
+			{"join", len(c.Join) > 0}, {"datacenter", c.Datacenter != ""}, {"agent-node", c.AgentNode != ""}, {"agent-bind", c.AgentBind != ""},
+			{"encrypt-file", c.Encrypt != ""}, {"agent-token-file", c.AgentToken != ""}, {"dns-token-file", c.DNSToken != ""},
+		} {
+			if s.set {
+				bad("%s configures the bundled Consul agent: it needs %s", Name(s.flag), Name("agent"))
 			}
 		}
-		if !filepath.IsAbs(c.AgentDataDir) {
-			bad("--agent-data-dir: %q is not an absolute path", safe.Short(c.AgentDataDir, 60))
+		if c.LocalConfig != "" {
+			bad("CONSUL_LOCAL_CONFIG configures the bundled Consul agent: it needs %s", Name("agent"))
 		}
-		if c.AgentNode != "" && safe.Label(c.AgentNode) != c.AgentNode {
-			bad("--agent-node: %q is not a node name: lowercase letters, digits and hyphens, 63 at most", safe.Short(c.AgentNode, 70))
-		}
-		if c.AgentBind != "" {
-			if a, err := netip.ParseAddr(c.AgentBind); err != nil || a.Zone() != "" || a.IsUnspecified() || a.IsMulticast() || a.IsLoopback() {
-				bad("--agent-bind: %q is not an address other nodes can reach", safe.Short(c.AgentBind, 60))
-			}
-		}
-		if u != nil && !loopback(u.Hostname()) {
-			bad("--agent: the bundled agent listens on this host; --consul %s is not a loopback address", safe.Short(c.Consul, 60))
-		}
-	} else if c.AgentNode != "" || c.AgentBind != "" {
-		bad("--agent-node and --agent-bind need --agent")
 	}
 	return errors.Join(errs...)
+}
+
+func (c *Config) validateAgent(u *url.URL) []error {
+	var errs []error
+	bad := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
+	if !filepath.IsAbs(c.AgentBin) {
+		bad("--agent-bin: %q is not an absolute path", safe.Short(c.AgentBin, 60))
+	}
+	for _, d := range c.AgentConfigDirs {
+		if !filepath.IsAbs(d) {
+			bad("--agent-config-dir: %q is not an absolute path", safe.Short(d, 60))
+		}
+	}
+	if !filepath.IsAbs(c.AgentDataDir) {
+		bad("--agent-data-dir: %q is not an absolute path", safe.Short(c.AgentDataDir, 60))
+	}
+	if c.AgentNode != "" && safe.Label(c.AgentNode) != c.AgentNode {
+		bad("%s: %q is not a node name: lowercase letters, digits and hyphens, 63 at most", Name("agent-node"), safe.Short(c.AgentNode, 70))
+	}
+	if c.AgentBind != "" {
+		if a, err := netip.ParseAddr(c.AgentBind); err != nil || a.Zone() != "" || a.IsUnspecified() || a.IsMulticast() || a.IsLoopback() {
+			bad("%s: %q is not an address other nodes can reach", Name("agent-bind"), safe.Short(c.AgentBind, 60))
+		}
+	}
+	if u != nil && !loopback(u.Hostname()) {
+		bad("%s: the bundled agent listens on this host; %q is not a loopback address", Name("consul"), safe.Short(c.Consul, 60))
+	}
+	for _, j := range c.Join {
+		if j == "" || len(j) > 512 || safe.Arg(j) != nil {
+			bad("%s: %q is not a server address", Name("join"), safe.Short(j, 60))
+		}
+	}
+	if c.Datacenter != "" && !datacenterRE.MatchString(c.Datacenter) {
+		bad("%s: %q is not a datacenter name: letters, digits, hyphens and underscores", Name("datacenter"), safe.Short(c.Datacenter, 70))
+	}
+	if c.LocalConfig != "" {
+		var m map[string]any
+		if len(c.LocalConfig) > 64<<10 || json.Unmarshal([]byte(c.LocalConfig), &m) != nil {
+			bad("CONSUL_LOCAL_CONFIG is not a JSON object of agent configuration (64 KiB at most)")
+		}
+	}
+	if !c.AgentConfigFound {
+		// Configured from here only: what the agent cannot do without.
+		if len(c.Join) == 0 {
+			bad("%s is required: the Consul servers to join, comma-separated (or mount the agent's configuration in %s)",
+				Name("join"), strings.Join(c.AgentConfigDirs, ", "))
+		}
+		registrator := c.Token != "" || c.TokenFile != ""
+		if (c.AgentToken != "") != registrator {
+			bad("with ACLs on, both CONSUL_AGENT_TOKEN and CONSUL_HTTP_TOKEN are needed (or their _FILE forms): the agent's token and the registrator's; with ACLs off, neither")
+		}
+		if c.DNSToken != "" && c.AgentToken == "" {
+			bad("CONSUL_DNS_TOKEN is set, but CONSUL_AGENT_TOKEN is not: ACLs are on, and the agent needs its token")
+		}
+	}
+	return errs
 }
 
 func loopback(host string) bool {
@@ -195,9 +325,6 @@ func loopback(host string) bool {
 	a, err := netip.ParseAddr(host)
 	return err == nil && a.IsLoopback()
 }
-
-// namespaceRE is a containerd namespace, as containerd checks them.
-var namespaceRE = regexp.MustCompile(`^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$`)
 
 // DomainOK is whether s can be the DNS domain Consul serves: a lowercase
 // host name, no dot at the end.
@@ -227,8 +354,8 @@ func Endpoint(s string) (network, addr string, err error) {
 	return "", "", fmt.Errorf("%q is not a path, unix:///path or tcp://host:port", safe.Short(s, 80))
 }
 
-// ConsulURL parses --consul: host:port, or a URL with http or https and no
-// path.
+// ConsulURL parses the agent's address: host:port, or a URL with http or
+// https and no path.
 func ConsulURL(s string) (*url.URL, error) {
 	if !strings.Contains(s, "://") {
 		s = "http://" + s
@@ -256,31 +383,4 @@ func hostPort(hp string) error {
 		return fmt.Errorf("%q is not a host name or address", safe.Short(host, 80))
 	}
 	return nil
-}
-
-// String is c for the start-up log line. It names the token file, never the
-// token.
-func (c Config) String() string {
-	var b strings.Builder
-	add := func(k string, v any) { fmt.Fprintf(&b, " %s=%v", k, v) }
-	add("socket", c.Socket)
-	add("runtime", c.Runtime)
-	add("consul", c.Consul)
-	if c.Domain != "" {
-		add("domain", c.Domain)
-	}
-	if c.TokenFile != "" {
-		add("token_file", c.TokenFile)
-	}
-	add("tags", strings.Join(c.Tags, ","))
-	if len(c.Addresses) > 0 {
-		add("address", strings.Join(c.Addresses, ","))
-	}
-	add("check", c.Check)
-	add("check_interval", c.CheckInterval)
-	add("deregister_after", c.DeregisterAfter)
-	add("resync", c.Resync)
-	add("dry_run", c.Ignore)
-	add("agent", c.Agent)
-	return strings.TrimSpace(b.String())
 }

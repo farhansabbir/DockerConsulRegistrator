@@ -210,7 +210,7 @@ func TestOnlyConsulYes(t *testing.T) {
 	if got := c.take(); got != "" {
 		t.Fatalf("consul=true registered:\n%s", got)
 	}
-	if !strings.Contains(log.String(), "its consul label is not yes") {
+	if !strings.Contains(log.String(), "its label's value is not the one to register") {
 		t.Fatalf("log: %s", log.String())
 	}
 	n := strings.Count(log.String(), "WARN")

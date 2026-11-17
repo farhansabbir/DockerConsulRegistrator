@@ -1,14 +1,20 @@
-# The registrator on every node of a Swarm, each with its Consul agent.
-# deploy.sh runs it for you (docker stack deploy -c stack.yml consul) and
-# names the config and secrets after their content, so a changed file
-# replaces the old one; run by hand, the names end in -1.
+# The registrator on every node of a Swarm, each with its Consul agent:
 #
-#   IMAGE    the registrator's image - every node must be able to pull it
-#   DOMAIN   the DNS domain to serve the services in (default: consul)
+#   cp registrator.env.example registrator.env     # and fill it in
+#   IMAGE=<registry>/docker-consul-registrator:<version> docker stack deploy -c stack.yml consul
+#
+# Everything is configured in registrator.env, read where the command runs.
+# The registrator checks it before anything starts, and when something is
+# missing or wrong it says what, and does not start (docker service logs
+# consul_registrator). Every node must be able to pull IMAGE.
+#
+# Secrets can sit in registrator.env as values, or come from Swarm secrets:
+# add a top-level `secrets:` entry, mount it in the service, and point the
+# secret's *_FILE variable at it (CONSUL_AGENT_TOKEN_FILE=/run/secrets/...).
 services:
   registrator:
-    image: ${IMAGE:?set IMAGE to the registrator's image}
-    command: ["--agent", "--token-file", "/run/secrets/registrator.token", "--domain", "${DOMAIN:-consul}"]
+    image: ${IMAGE:?set IMAGE to the image of the registrator}
+    env_file: registrator.env
     networks: [hostnet]
     volumes:
       - type: bind
@@ -17,16 +23,6 @@ services:
       - type: volume
         source: agent-data
         target: /consul/data
-    configs:
-      - source: agent
-        target: /consul/config/agent.hcl
-    secrets:
-      - source: agent-secrets
-        target: /consul/config/secrets.hcl
-        mode: 0400
-      - source: registrator-token
-        target: registrator.token
-        mode: 0400
     deploy:
       mode: global
       restart_policy:
@@ -43,16 +39,3 @@ networks:
 volumes:
   agent-data:
     name: consul-agent-data # the agent's state, one per node: keeps its node ID
-
-configs:
-  agent:
-    name: consul-registrator-agent-${AGENT_VERSION:-1}
-    file: ./agent.hcl
-
-secrets:
-  agent-secrets:
-    name: consul-registrator-agent-secrets-${SECRETS_VERSION:-1}
-    file: ./secrets.hcl
-  registrator-token:
-    name: consul-registrator-token-${TOKEN_VERSION:-1}
-    file: ./registrator.token

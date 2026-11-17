@@ -14,7 +14,8 @@ import (
 	"github.com/farhansabbir/DockerConsulRegistrator/internal/safe"
 )
 
-// A Swarm service is registered when it carries consul=yes - on the service
+// A Swarm service is registered when it carries the label (consul=yes by
+// default, --label) - on the service
 // (docker service create --label) or on its containers (--container-label) -
 // and its routing-mesh ports are registered too. Only managers can read a
 // Swarm's services; workers cannot. So the registrators on managers write
@@ -60,10 +61,11 @@ func (r *Registrator) swarmServices(ctx context.Context, host runtime.Host, seen
 	}
 	out := map[string]swarmService{}
 	for _, s := range list {
-		if s.Labels[Label] != "yes" && s.ContainerLabels[Label] != "yes" {
-			if v, ok := s.Labels[Label]; ok {
-				r.noteOnce(seen, Note{Key: "service/" + s.ID + "/label", Msg: "a Swarm service is not registered: its consul label is not yes",
-					KV: []any{"swarm_service", safe.Short(s.Name, 80), "consul", safe.Short(v, 40)}})
+		key, want := r.cfg.LabelKey, r.cfg.LabelValue
+		if s.Labels[key] != want && s.ContainerLabels[key] != want {
+			if v, ok := s.Labels[key]; ok {
+				r.noteOnce(seen, Note{Key: "service/" + s.ID + "/label", Msg: "a Swarm service is not registered: its label's value is not the one to register",
+					KV: []any{"swarm_service", safe.Short(s.Name, 80), "label", key + "=" + safe.Short(v, 40), "registers", key + "=" + want}})
 			}
 			continue
 		}

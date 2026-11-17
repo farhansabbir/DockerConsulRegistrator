@@ -26,8 +26,9 @@ const (
 	MetaHash  = "registration-hash" // the registration without its check's status
 )
 
-// Label marks what is registered - a container, or a Swarm service on the
-// service or on its containers: Label=yes.
+// Label is the label's key by default (--label consul=yes): what marks a
+// container, or a Swarm service on the service or its containers, to
+// register.
 const Label = "consul"
 
 // Addrs are the host's addresses to register for ports published on all of

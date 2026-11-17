@@ -213,26 +213,35 @@ $ dig +short web.service.dmarts.app SRV
 
 <section id="run">
   <h2>Run it</h2>
-  <p><strong>You need:</strong> a Consul cluster to join (with ACLs on: its gossip key and three tokens - see <a href="#acl">ACLs</a>), the image where your hosts can pull it, and three files next to <code>deploy.sh</code>:</p>
-  <ul>
-    <li><code>agent.hcl</code> - your Consul servers and datacenter (from <code>agent.hcl.example</code>);</li>
-    <li><code>secrets.hcl</code> - the gossip key, the agents' and the DNS token (from <code>secrets.hcl.example</code>);</li>
-    <li><code>registrator.token</code> - the registrator's token.</li>
-  </ul>
-  <h3>Start it</h3>
-<pre><code>IMAGE=&lt;registry&gt;/docker-consul-registrator:&lt;version&gt; DOMAIN=dmarts.app ./deploy.sh</code></pre>
+  <p>Everything is configured through environment variables - run the container however you run containers. Before anything starts it checks them all; if something is missing or wrong, it lists every problem and does not start.</p>
   <div class="table">
   <table>
-    <thead><tr><th>Where</th><th>What it does</th></tr></thead>
+    <thead><tr><th>Variable</th><th></th></tr></thead>
     <tbody>
-      <tr><td>a Swarm manager</td><td>deploys the stack: one task on every node</td></tr>
-      <tr><td>any other Docker host</td><td>one container on this host</td></tr>
-      <tr><td>Podman</td><td><code>DOCKER=podman ./deploy.sh</code> - rootful, or rootless with the user's <code>podman.socket</code></td></tr>
-      <tr><td>containerd</td><td><code>DOCKER=nerdctl ./deploy.sh</code></td></tr>
+      <tr><td><code>CONSUL_RETRY_JOIN</code></td><td><strong>required</strong> - the Consul servers to join, comma-separated</td></tr>
+      <tr><td><code>CONSUL_DATACENTER</code></td><td>their datacenter (default <code>dc1</code>)</td></tr>
+      <tr><td><code>CONSUL_DOMAIN</code></td><td>the DNS domain to serve the services in (default <code>consul</code>)</td></tr>
+      <tr><td><code>REGISTRATOR_LABEL</code></td><td>what marks a container or a Swarm service to register (default <code>consul=yes</code>)</td></tr>
+      <tr><td><code>CONSUL_ENCRYPT</code></td><td>the cluster's gossip key, when its gossip is encrypted</td></tr>
+      <tr><td><code>CONSUL_AGENT_TOKEN</code>, <code>CONSUL_HTTP_TOKEN</code></td><td>with ACLs on, both: the agent's token and the registrator's</td></tr>
+      <tr><td><code>CONSUL_DNS_TOKEN</code></td><td>the token anonymous DNS reads with</td></tr>
+      <tr><td><code>CONSUL_LOCAL_CONFIG</code></td><td>more agent configuration, a JSON object (TLS...)</td></tr>
     </tbody>
   </table>
   </div>
-  <p>Run it again after changing a file or the image: it replaces what it started. <code>DRY_RUN=1</code> prints what it would run.</p>
+  <p>Each secret can come from a file instead (<code>CONSUL_AGENT_TOKEN_FILE</code>, ...) for Docker and Swarm secrets. Every other option has its variable too: <code>--help</code> lists them.</p>
+  <h3>Docker</h3>
+<pre><code>docker run -d --name consul-registrator --restart unless-stopped --network host \
+  -v /var/run/docker.sock:/var/run/docker.sock -v consul-agent-data:/consul/data \
+  -e CONSUL_RETRY_JOIN=10.0.0.11,10.0.0.12 -e CONSUL_DOMAIN=dmarts.app \
+  -e CONSUL_AGENT_TOKEN_FILE=/run/secrets/agent-token ... \
+  &lt;registry&gt;/docker-consul-registrator:&lt;version&gt;</code></pre>
+  <p>Or keep the variables in a file - <code>deploy/registrator.env.example</code> has them all - and pass <code>--env-file registrator.env</code>.</p>
+  <h3>A Swarm, one task per node</h3>
+<pre><code>IMAGE=&lt;registry&gt;/docker-consul-registrator:&lt;version&gt; docker stack deploy -c stack.yml consul</code></pre>
+  <p><code>deploy/stack.yml</code> reads the same <code>registrator.env</code>.</p>
+  <h3>Podman, containerd</h3>
+  <p>The same, with the runtime's socket mounted at its usual path: <code>/run/podman/podman.sock</code>, or <code>/run/containerd/containerd.sock</code> with <code>--hostname "$(hostname)"</code> (nerdctl).</p>
   <h3>Label what to register</h3>
 <pre><code>docker run -d -l consul=yes -p 8080:80 --name web nginx
 docker service create --label consul=yes --publish 8181:80 --replicas 3 --name web-svc nginx</code></pre>
@@ -244,27 +253,7 @@ docker service create --label consul=yes --publish 8181:80 --replicas 3 --name w
 DNS=127.0.0.1:8600
 Domains=~dmarts.app ~1.168.192.in-addr.arpa</code></pre>
   <p>or with dnsmasq: <code>server=/dmarts.app/127.0.0.1#8600</code>.</p>
-  <p class="note">Only Swarm managers can read the Swarm's services, so the registrators on managers share the ones to register - and their routing-mesh ports - through Consul's KV store, and the workers' registrators read them there. A manager must run the registrator; the stack's global service always does.</p>
-  <h3>The agent's configuration</h3>
-<pre><code># agent.hcl
-datacenter         = "dc1"
-retry_join         = ["consul-server-1", "consul-server-2", "consul-server-3"]
-client_addr        = "127.0.0.1"
-leave_on_terminate = true
-dns_config { only_passing = true }
-acl {
-  enabled        = true
-  default_policy = "deny"
-}
-
-# secrets.hcl - keep it secret
-encrypt = "&lt;gossip key&gt;"
-acl {
-  tokens {
-    agent   = "&lt;agent token&gt;"
-    default = "&lt;DNS read token&gt;"
-  }
-}</code></pre>
+  <p class="note">Only Swarm managers can read the Swarm's services, so the registrators on managers share the ones to register - and their routing-mesh ports - through Consul's KV store, and the workers' registrators read them there. A manager must run the registrator (the stack's global service does), and every node must use the same <code>REGISTRATOR_LABEL</code>.</p>
 </section>
 
 <section id="runtimes">
@@ -286,14 +275,15 @@ acl {
 
 <section id="agent">
   <h2>The bundled Consul agent</h2>
-  <p>The registrator registers with the agent in its own container only; the agent's anti-entropy keeps the servers in step. It starts the agent with what it works out from the host:</p>
+  <p>The registrator - the container's main process - starts the agent in the same container, registers with it only, and the agent's anti-entropy keeps the servers in step. It starts the agent with what it works out from the host:</p>
   <ul>
     <li><strong>node name</strong> - the host's name;</li>
     <li><strong>address</strong> - the host's Swarm address, else the default route's;</li>
     <li><strong>IPv6</strong> - the stable global address beside it, for AAAA answers;</li>
-    <li><strong>DNS domain</strong> - <code>--domain</code>, made the agent's own domain (so PTR answers name things in it), with <code>consul</code> kept as its alternative.</li>
+    <li><strong>DNS domain</strong> - <code>CONSUL_DOMAIN</code>, made the agent's own domain (so PTR answers name things in it), with <code>consul</code> kept as its alternative;</li>
+    <li><strong>the rest</strong> - servers, datacenter, gossip key, tokens - from the environment, written into a configuration file only it can read.</li>
   </ul>
-  <p>Without <code>--agent</code> it registers with the agent <code>--consul</code> names, and with <code>--domain</code> it checks that agent serves the domain - and says what to add to its configuration when it does not.</p>
+  <p>Configuration mounted in <code>/consul/config</code> is read too; the environment wins over it.</p>
 </section>
 
 <section id="acl">
@@ -333,30 +323,30 @@ query_prefix "" {
 }</code></pre>
     </div>
   </div>
-  <p style="margin-top:1rem">The registrator reads its token from <code>--token-file</code> only, and again whenever the file changes.</p>
+  <p style="margin-top:1rem">The three tokens are <code>CONSUL_HTTP_TOKEN</code>, <code>CONSUL_AGENT_TOKEN</code> and <code>CONSUL_DNS_TOKEN</code> - or their <code>_FILE</code> forms.</p>
 </section>
 
 <section id="options">
   <h2>Options</h2>
+  <p>Each option has an environment variable and a flag; a flag wins over its variable.</p>
   <div class="table">
   <table>
-    <thead><tr><th>Option</th><th>What it does</th></tr></thead>
+    <thead><tr><th>Variable</th><th>Flag</th><th>What it does</th></tr></thead>
     <tbody>
-      <tr><td><code>-s, --socket</code></td><td>the runtime's socket: a path, <code>unix:///path</code> or <code>tcp://host:port</code> (default: auto)</td></tr>
-      <tr><td><code>--runtime</code></td><td><code>auto</code>, <code>docker</code>, <code>podman</code> or <code>containerd</code></td></tr>
-      <tr><td><code>-c, --consul</code></td><td>the agent's HTTP API (default <code>127.0.0.1:8500</code>); <code>https://</code> with <code>--ca-file</code>, <code>--cert-file</code>, <code>--key-file</code></td></tr>
-      <tr><td><code>--token-file</code></td><td>the ACL token to register with</td></tr>
-      <tr><td><code>--domain</code></td><td>the DNS domain to serve the services in</td></tr>
-      <tr><td><code>-t, --tags</code></td><td>Consul tags for every service; the protocol is always added</td></tr>
-      <tr><td><code>--address</code></td><td>the host address to register, one IPv4 and one IPv6 (default: the agent's, and the IPv6 address beside it)</td></tr>
-      <tr><td><code>--check</code></td><td><code>auto</code>, <code>tcp</code>, <code>ttl</code> or <code>none</code></td></tr>
-      <tr><td><code>-i, --ignore</code></td><td>dry run: log what would change, change nothing</td></tr>
-      <tr><td><code>--agent</code></td><td>start the bundled Consul agent and register with it</td></tr>
-      <tr><td><code>--debug</code></td><td>log every event and decision</td></tr>
+      <tr><td><code>REGISTRATOR_LABEL</code></td><td><code>--label</code></td><td>what marks what to register (default <code>consul=yes</code>)</td></tr>
+      <tr><td><code>REGISTRATOR_TAGS</code></td><td><code>-t, --tags</code></td><td>Consul tags for every service; the protocol is always added</td></tr>
+      <tr><td><code>REGISTRATOR_ADDRESS</code></td><td><code>--address</code></td><td>the host address to register, one IPv4 and one IPv6 (default: the agent's, and the IPv6 address beside it)</td></tr>
+      <tr><td><code>REGISTRATOR_CHECK</code></td><td><code>--check</code></td><td><code>auto</code>, <code>tcp</code>, <code>ttl</code> or <code>none</code></td></tr>
+      <tr><td><code>REGISTRATOR_SOCKET</code></td><td><code>-s, --socket</code></td><td>the runtime's socket: a path, <code>unix:///path</code> or <code>tcp://host:port</code> (default: auto)</td></tr>
+      <tr><td><code>REGISTRATOR_RUNTIME</code></td><td><code>--runtime</code></td><td><code>auto</code>, <code>docker</code>, <code>podman</code> or <code>containerd</code></td></tr>
+      <tr><td><code>REGISTRATOR_DRY_RUN</code></td><td><code>-i, --ignore</code></td><td>dry run: log what would change, change nothing</td></tr>
+      <tr><td><code>REGISTRATOR_AGENT</code></td><td><code>--agent</code></td><td>start the bundled agent and register with it (the image does)</td></tr>
+      <tr><td><code>CONSUL_HTTP_ADDR</code></td><td><code>-c, --consul</code></td><td>without the bundled agent: the agent's HTTP API (default <code>127.0.0.1:8500</code>)</td></tr>
+      <tr><td><code>REGISTRATOR_DEBUG</code></td><td><code>--debug</code></td><td>log every event and decision</td></tr>
     </tbody>
   </table>
   </div>
-  <p><code>docker-consul-registrator --help</code> lists the rest.</p>
+  <p><code>docker-consul-registrator --help</code> lists them all.</p>
 </section>
 
 <section id="security">
@@ -364,7 +354,7 @@ query_prefix "" {
   <ul>
     <li>A runtime's socket is root on its host: run the registrator where you would run root. For Docker, a read-only socket proxy can stand in front (<code>--socket tcp://proxy:2375</code>).</li>
     <li>Whatever comes in is checked first - flags, the runtime's names, labels, ports and addresses, Consul's answers, the token file - and text from outside is cleaned before it reaches a log line.</li>
-    <li>The ACL token is never taken from the command line, and never logged.</li>
+    <li>Secrets come from the environment or a file, never the command line, and are never logged. Prefer the <code>_FILE</code> forms with Docker or Swarm secrets: a value in the environment shows in <code>docker inspect</code>.</li>
   </ul>
 </section>
 

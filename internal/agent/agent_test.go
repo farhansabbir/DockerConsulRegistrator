@@ -96,3 +96,43 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+func TestWriteConfig(t *testing.T) {
+	dir := t.TempDir()
+	files, err := WriteConfig(dir, Settings{Datacenter: "lab", Join: []string{"192.168.1.92"}, Encrypt: "k3y=",
+		AgentToken: "agent-tok", DNSToken: "dns-tok", Defaults: true}, `{"log_level":"debug"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || filepath.Base(files[0]) != "registrator.json" || filepath.Base(files[1]) != "local.json" {
+		t.Fatalf("files = %v", files)
+	}
+	b, _ := os.ReadFile(files[0])
+	for _, want := range []string{`"datacenter": "lab"`, `"retry_join": [`, `"192.168.1.92"`, `"encrypt": "k3y="`, `"client_addr": "127.0.0.1"`,
+		`"only_passing": true`, `"grpc": -1`, `"default_policy": "deny"`, `"agent": "agent-tok"`, `"default": "dns-tok"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("no %s in\n%s", want, b)
+		}
+	}
+	for _, f := range files {
+		if fi, _ := os.Stat(f); fi.Mode().Perm() != 0o600 {
+			t.Errorf("%s is %v, want 0600", f, fi.Mode().Perm())
+		}
+	}
+	// Configured elsewhere, nothing given here: no file at all.
+	if files, err := WriteConfig(t.TempDir(), Settings{}, ""); err != nil || len(files) != 0 {
+		t.Fatalf("nothing to write: %v %v", files, err)
+	}
+	// Without a token, no ACL block.
+	files, _ = WriteConfig(t.TempDir(), Settings{Join: []string{"s1"}, Defaults: true}, "")
+	if b, _ := os.ReadFile(files[0]); strings.Contains(string(b), "acl") {
+		t.Fatalf("ACLs without a token:\n%s", b)
+	}
+}
+
+func TestEnvironDropsTheSecrets(t *testing.T) {
+	got := Environ([]string{"PATH=/bin", "CONSUL_HTTP_TOKEN=x", "CONSUL_AGENT_TOKEN=y", "CONSUL_HTTP_TOKEN_FILE=/run/secrets/t", "CONSUL_RETRY_JOIN=s1"})
+	if strings.Join(got, " ") != "PATH=/bin CONSUL_HTTP_TOKEN_FILE=/run/secrets/t CONSUL_RETRY_JOIN=s1" {
+		t.Fatalf("Environ = %v", got)
+	}
+}

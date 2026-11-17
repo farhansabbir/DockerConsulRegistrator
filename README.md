@@ -10,9 +10,10 @@ one it is talking to by itself.
 
 ## What it does
 
-What is labelled `consul=yes` is registered: a container (`docker run -l`),
-or a Swarm service - on the service (`docker service create --label`) or on
-its containers (`--container-label`). Every node registers the containers
+What carries the label - `consul=yes` unless `REGISTRATOR_LABEL` says
+otherwise - is registered: a container (`docker run -l`), or a Swarm
+service, on the service (`docker service create --label`) or on its
+containers (`--container-label`). Every node registers the containers
 running on it, at its own address, one Consul service instance **per
 published port and address family**:
 
@@ -67,56 +68,97 @@ restarts, it follows it again.
 
 ## The bundled Consul agent
 
-The image carries a Consul agent. With `--agent` (the image's default), the
-registrator starts it in the same container, registers with it only, and
-the agent's anti-entropy keeps the Consul servers in step. The registrator
-works out what the agent needs from the host:
+The image carries a Consul agent. The registrator - the container's main
+process - starts it in the same container (`--agent`, the image's default),
+registers with it only, and the agent's anti-entropy keeps the Consul
+servers in step. The registrator works out what the agent needs from the
+host:
 
 - **node name:** the host's name;
-- **address:** the host's Swarm address, else the default route's
-  (`--agent-bind`);
+- **address:** the host's Swarm address, else the default route's;
 - **IPv6:** the stable global address beside it, for AAAA answers;
-- **DNS domain:** `--domain`, made the agent's own domain - PTR answers
-  name things in it - with `consul` kept as its alternative.
+- **DNS domain:** `CONSUL_DOMAIN`, made the agent's own domain - PTR
+  answers name things in it - with `consul` kept as its alternative.
 
-Everything else - servers to join, the gossip key, ACL tokens, TLS - is
-ordinary Consul configuration in `/consul/config` (`--agent-config-dir`).
-Keep `/consul/data` on a volume.
+The rest comes from the environment (below): it writes the agent's
+configuration into a file only it can read, at start. Configuration
+mounted in `/consul/config` is read too, and the environment wins over it.
 
-Without `--agent`, it registers with whichever agent `--consul` names. It
-cannot change that agent's DNS domain, so with `--domain` it checks the
-agent serves it, and refuses to start, saying what to add, when it does not.
+Without `--agent` (`REGISTRATOR_AGENT=false` is the default outside the
+image), it registers with whichever agent `CONSUL_HTTP_ADDR` names. It
+cannot change that agent's DNS domain, so with `CONSUL_DOMAIN` it checks
+the agent serves it, and refuses to start, saying what to add, when it
+does not.
 
 ## Running it
 
-**What you need:**
-
-1. **A Consul cluster to join** - its servers' addresses and datacenter. With
-   ACLs on, its gossip key and three tokens: the registrator's, the agents'
-   and one for DNS (see [Consul ACLs](#consul-acls)).
-2. **The image where your hosts can pull it** - a registry they reach.
-3. **Three files in [deploy/](deploy/):** `agent.hcl` (from
-   `agent.hcl.example`: servers, datacenter), `secrets.hcl` (from
-   `secrets.hcl.example`: gossip key, agent and DNS tokens) and
-   `registrator.token`. `.gitignore` keeps them out of the repository.
-
-**Then, from `deploy/`:**
+Everything is configured through environment variables - run the
+container however you run containers. Before anything starts the
+registrator checks them all; when something is missing or wrong it lists
+every problem and does not start:
 
 ```
-IMAGE=<registry>/docker-consul-registrator:<version> DOMAIN=dmarts.app ./deploy.sh
+docker-consul-registrator: cannot start:
+  - CONSUL_RETRY_JOIN (--join) is required: the Consul servers to join, comma-separated (or mount the agent's configuration in /consul/config)
+  - with ACLs on, both CONSUL_AGENT_TOKEN and CONSUL_HTTP_TOKEN are needed (or their _FILE forms): the agent's token and the registrator's; with ACLs off, neither
+Run 'docker-consul-registrator --help' for every setting.
 ```
 
-- **on a Swarm manager:** it deploys [stack.yml](deploy/stack.yml) - one task
-  on every node;
-- **on any other Docker host:** one container on that host;
-- **Podman:** `DOCKER=podman ./deploy.sh` (rootful, or rootless with
-  `systemctl --user enable --now podman.socket`);
-- **containerd:** `DOCKER=nerdctl ./deploy.sh`.
+| Variable | |
+|---|---|
+| `CONSUL_RETRY_JOIN` | **required** - the Consul servers to join, comma-separated |
+| `CONSUL_DATACENTER` | their datacenter (default `dc1`) |
+| `CONSUL_DOMAIN` | the DNS domain to serve the services in (default `consul`) |
+| `REGISTRATOR_LABEL` | what marks a container or a Swarm service to register (default `consul=yes`) |
+| `CONSUL_ENCRYPT` | the cluster's gossip key, when its gossip is encrypted |
+| `CONSUL_AGENT_TOKEN`, `CONSUL_HTTP_TOKEN` | with ACLs on, both: the agent's token and the registrator's |
+| `CONSUL_DNS_TOKEN` | the token anonymous DNS reads with |
+| `CONSUL_LOCAL_CONFIG` | more agent configuration as a JSON object (TLS, for one) |
 
-Run it again after changing a file or the image: it replaces what it
-started. `DRY_RUN=1` prints what it would run. On a Swarm, configs and
-secrets are named after their content - Swarm cannot change them in place -
-so a changed file simply replaces the old one.
+Each secret can come from a file instead - `CONSUL_AGENT_TOKEN_FILE`,
+`CONSUL_HTTP_TOKEN_FILE`, ... - for Docker and Swarm secrets; never from
+the command line. Every other option has its variable too
+(`REGISTRATOR_TAGS`, `REGISTRATOR_CHECK`, ...): `docker-consul-registrator
+--help` lists them, each beside its flag. A flag wins over its variable.
+
+[deploy/registrator.env.example](deploy/registrator.env.example) has them
+all; copy it to `registrator.env`, fill it in, and use it any way below.
+`.gitignore` keeps the filled-in copy out of the repository.
+
+**Docker:**
+
+```
+docker run -d --name consul-registrator --restart unless-stopped --network host \
+  -v /var/run/docker.sock:/var/run/docker.sock -v consul-agent-data:/consul/data \
+  --env-file registrator.env <registry>/docker-consul-registrator:<version>
+```
+
+**Podman** - mount its socket instead
+(`-v /run/podman/podman.sock:/run/podman/podman.sock`; rootless:
+`-v $XDG_RUNTIME_DIR/podman/podman.sock:/run/podman/podman.sock`, with
+`systemctl --user enable --now podman.socket`).
+
+**containerd** (nerdctl) - mount its socket and give the container the
+host's name: `-v /run/containerd/containerd.sock:/run/containerd/containerd.sock
+--hostname "$(hostname)"`. containerd knows nothing of published ports: the
+registrator reads them from the label nerdctl writes (`nerdctl/ports`), so
+containers made with nerdctl are registered. It reads one namespace
+(`REGISTRATOR_CONTAINERD_NAMESPACE`, default `default` - nerdctl's).
+
+**A Swarm** - every node, from [deploy/stack.yml](deploy/stack.yml), on a
+manager (or from anywhere with `docker -H ssh://<manager>`):
+
+```
+IMAGE=<registry>/docker-consul-registrator:<version> docker stack deploy -c stack.yml consul
+```
+
+**Compose, Kubernetes, Nomad, systemd...** - the same: the host's network,
+the runtime's socket, a volume for `/consul/data`, and the environment.
+
+The socket is found at its usual path (`/var/run/docker.sock`,
+`/run/podman/podman.sock`, `/run/containerd/containerd.sock`) and the
+runtime is known by how it answers; `REGISTRATOR_SOCKET` and
+`REGISTRATOR_RUNTIME` say otherwise.
 
 **Label what to register:**
 
@@ -146,37 +188,19 @@ or with dnsmasq: `server=/dmarts.app/127.0.0.1#8600`. Add your network's
 reverse zone too (`~1.168.192.in-addr.arpa`, or
 `server=/1.168.192.in-addr.arpa/127.0.0.1#8600`) for PTR answers.
 
-**What deploy.sh runs**, should you run it yourself: the runtime's socket is
-mounted at its usual path (`/var/run/docker.sock`, `/run/podman/podman.sock`,
-`/run/containerd/containerd.sock`), where the registrator finds it and tells
-the runtime by how it answers:
-
-```
-docker run -d --name consul-registrator --restart unless-stopped --network host --hostname "$(hostname)" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v consul-agent-data:/consul/data \
-  -v "$PWD/agent.hcl:/consul/config/agent.hcl:ro" \
-  -v "$PWD/secrets.hcl:/consul/config/secrets.hcl:ro" \
-  -v "$PWD/registrator.token:/run/secrets/registrator.token:ro" \
-  <image> --agent --token-file /run/secrets/registrator.token --domain dmarts.app
-```
-
-**containerd** knows nothing of published ports: the registrator reads them
-from the label nerdctl writes (`nerdctl/ports`), so containers made with
-nerdctl are registered and others are reported. It reads one namespace
-(`--containerd-namespace`, default `default` - nerdctl's).
-
-**Swarm:** only a manager can read the Swarm's services - their labels and
-routing-mesh ports - so the registrators on managers write the services to
-register into Consul's KV store (`docker-consul-registrator/swarm/`), and
-those on workers read them there. A routing-mesh task is registered at its
-node's IPv4 address and published port, one instance per task, its check
-passing while it runs (or following its health check); a task published
-with `mode=host` is registered like any container.
+**Swarm services:** only a manager can read the Swarm's services - their
+labels and routing-mesh ports - so the registrators on managers write the
+services to register into Consul's KV store (`docker-consul-registrator/swarm/`),
+and those on workers read them there. Every node must use the same
+`REGISTRATOR_LABEL`. A routing-mesh task is registered at its node's IPv4
+address and published port, one instance per task, its check passing
+while it runs (or following its health check); a task published with
+`mode=host` is registered like any container.
 
 ## Consul ACLs
 
-The registrator's token (`--token-file`, read again when the file changes):
+The registrator's token, `CONSUL_HTTP_TOKEN` (from a file, it is read again
+when the file changes):
 
 ```hcl
 service_prefix "" { policy = "write" }
@@ -184,7 +208,7 @@ agent_prefix "" { policy = "read" }
 key_prefix "docker-consul-registrator/" { policy = "write" } # a Swarm's services, shared by its managers
 ```
 
-The bundled agents' token (`acl.tokens.agent`):
+The bundled agents' token, `CONSUL_AGENT_TOKEN` (one for all of them):
 
 ```hcl
 node_prefix "" { policy = "write" }
@@ -192,7 +216,7 @@ service_prefix "" { policy = "read" }
 ```
 
 Anonymous DNS under `default_policy = "deny"` needs a token that may read,
-set as the agents' `acl.tokens.default`:
+`CONSUL_DNS_TOKEN` (the agents' default token):
 
 ```hcl
 node_prefix "" { policy = "read" }
@@ -202,10 +226,11 @@ query_prefix "" { policy = "read" }
 
 ## Options
 
-`docker-consul-registrator --help` lists them all. The ones you will reach
-for: `--socket`, `--runtime`, `--consul`, `--token-file`, `--domain`,
-`--tags`, `--address`, `--check`, `--ignore` (dry run: logs what would
-change), `--agent`, `--debug`.
+`docker-consul-registrator --help` lists them all, each with its
+environment variable. Beyond the ones above: `REGISTRATOR_TAGS` (Consul
+tags for every service), `REGISTRATOR_ADDRESS` (the address to register),
+`REGISTRATOR_CHECK`, `REGISTRATOR_DRY_RUN` (log what would change, change
+nothing), `REGISTRATOR_DEBUG`.
 
 ## Security
 
@@ -215,8 +240,11 @@ change), `--agent`, `--debug`.
 - Whatever comes in is checked first: flags, Docker's and containerd's
   answers (names, labels, ports, addresses), Consul's answers and the token
   file. Text from outside is cleaned before it reaches a log line.
-- The ACL token is read from a file only, never from the command line, and
-  never logged.
+- Secrets - tokens and the gossip key - come from the environment or a file,
+  never the command line, and are never logged; the agent's configuration
+  holding them is a file only the registrator can read. Prefer the `_FILE`
+  forms with Docker or Swarm secrets: a value in the environment shows in
+  `docker inspect`.
 
 ## Building
 

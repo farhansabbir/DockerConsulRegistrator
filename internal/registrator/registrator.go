@@ -1,5 +1,6 @@
 // Package registrator keeps the Consul agent's services in line with the
-// runtime's containers: for every running container labelled consul=yes, one
+// runtime's containers: for every running container carrying the label
+// (consul=yes by default), one
 // service per published port and address family; nothing for anything else.
 // It compares on every change the runtime reports (a burst of changes is one
 // comparison), and on a timer in case a change was missed. It only ever
@@ -131,7 +132,7 @@ func (r *Registrator) Run(ctx context.Context) error {
 func (r *Registrator) watch(ctx context.Context) {
 	backoff := time.Second
 	for {
-		err := r.rt.Watch(ctx, []string{Label, runtime.LabelSwarmServiceID}, func() {
+		err := r.rt.Watch(ctx, []string{r.cfg.LabelKey, runtime.LabelSwarmServiceID}, func() {
 			backoff = time.Second
 			r.log.OK("following the runtime's container events", "runtime", r.rt.Kind())
 			r.Trigger()
@@ -189,7 +190,7 @@ func (r *Registrator) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	list, err := r.rt.Containers(ctx, Label, runtime.LabelSwarmServiceID)
+	list, err := r.rt.Containers(ctx, r.cfg.LabelKey, runtime.LabelSwarmServiceID)
 	if err != nil {
 		return err
 	}
@@ -197,17 +198,17 @@ func (r *Registrator) Reconcile(ctx context.Context) error {
 	for _, c := range list {
 		sid := c.Labels[runtime.LabelSwarmServiceID]
 		_, serviceLabelled := svcs[sid]
-		v, has := c.Labels[Label]
+		v, has := c.Labels[r.cfg.LabelKey]
 		switch {
-		case v == "yes" || (sid != "" && serviceLabelled):
+		case v == r.cfg.LabelValue || (sid != "" && serviceLabelled):
 			labelled = append(labelled, c)
 			if sid != "" && !serviceLabelled && len(c.Ports) == 0 && host.SwarmAddr != "" && !host.SwarmManager {
 				r.noteOnce(seen, Note{Key: "mesh/" + sid, Msg: "a Swarm task's routing-mesh ports are not known here: the registrator on a manager writes them to Consul - is one running?",
 					KV: []any{"swarm_service", safe.Short(c.Labels[runtime.LabelSwarmService], 80)}})
 			}
 		case has:
-			r.noteOnce(seen, Note{Key: c.ID + "/label", Msg: "a container is not registered: its consul label is not yes",
-				KV: []any{"container", safe.Short(c.Name, 80), "consul", safe.Short(v, 40)}})
+			r.noteOnce(seen, Note{Key: c.ID + "/label", Msg: "a container is not registered: its label's value is not the one to register",
+				KV: []any{"container", safe.Short(c.Name, 80), "label", r.cfg.LabelKey + "=" + safe.Short(v, 40), "registers", r.cfg.LabelKey + "=" + r.cfg.LabelValue}})
 		}
 	}
 	want, notes := Desired(labelled, meshPorts(svcs), Options{

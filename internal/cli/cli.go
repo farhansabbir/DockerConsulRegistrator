@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/farhansabbir/DockerConsulRegistrator/internal/registrator"
 	"github.com/farhansabbir/DockerConsulRegistrator/internal/runtime"
 	"github.com/farhansabbir/DockerConsulRegistrator/internal/safe"
+	"github.com/farhansabbir/DockerConsulRegistrator/internal/secret"
 )
 
 // Name is the command's name.
@@ -33,68 +35,102 @@ const Name = "docker-consul-registrator"
 
 const help = `Usage: docker-consul-registrator [options]
 
-Registers the published ports of the running containers labelled consul=yes
-with the local Consul agent - one service per port and address family, so
-Consul's DNS answers A, AAAA, SRV and PTR for them - and deregisters them when
-the containers stop. It touches only the services it registered.
+Registers the published ports of the running containers carrying a label
+(consul=yes) - and the tasks of Swarm services carrying it - with the
+local Consul agent, one service per port and address family, so Consul's
+DNS answers A, AAAA, SRV and PTR for them; and deregisters them when they
+stop. It touches only the services it registered.
 
-Container runtime:
+Every option can be given in its environment variable instead [shown in
+brackets]; the command line wins. Secrets come from the environment or a
+file only. Before anything starts, everything is checked; what is missing
+or wrong is listed, and nothing starts.
+
+The bundled Consul agent (the image starts it: --agent):
+      --join ADDR,...           the Consul servers to join - required, unless
+                                the agent's configuration is mounted in
+                                /consul/config [CONSUL_RETRY_JOIN]
+      --datacenter NAME         the servers' datacenter (default dc1)
+                                [CONSUL_DATACENTER]
+      --domain DOMAIN           the DNS domain to serve the services in, e.g.
+                                dmarts.app (default consul) [CONSUL_DOMAIN]
+      --agent-node NAME         its node name (default: the host's name)
+                                [CONSUL_NODE_NAME]
+      --agent-bind IP           its address (default: the host's Swarm
+                                address, else the default route's)
+                                [CONSUL_BIND_ADDR]
+      --agent                   start the agent in this container, register
+                                with it, stop it on the way out
+                                [REGISTRATOR_AGENT]
+      --agent-config-dir DIR    more of its configuration (repeatable; default
+                                /consul/config)
+      --agent-data-dir DIR      its state - keep it on a volume (default
+                                /consul/data)
+      --agent-bin PATH          (default /bin/consul)
+
+Secrets - each from its variable, or from the file its _FILE variable names:
+  CONSUL_ENCRYPT             the cluster's gossip key
+  CONSUL_AGENT_TOKEN         the agent's ACL token          \  with ACLs on,
+  CONSUL_HTTP_TOKEN          the registrator's ACL token    /  both needed
+  CONSUL_DNS_TOKEN           the token anonymous DNS reads with
+  CONSUL_LOCAL_CONFIG        more agent configuration, a JSON object (TLS...)
+On the command line, as files only: --encrypt-file FILE, --agent-token-file
+FILE, --dns-token-file FILE, --token-file FILE.
+
+Containers:
+      --label KEY=VALUE         what marks a container, or a Swarm service, to
+                                register (default consul=yes)
+                                [REGISTRATOR_LABEL]
   -s, --socket PATH|URL         the runtime's socket: a path, unix:///path or
                                 tcp://host:port (default auto: the usual paths
                                 of Docker's, Podman's and containerd's)
+                                [REGISTRATOR_SOCKET]
       --runtime NAME            auto, docker, podman or containerd (default
                                 auto: known by how the socket answers)
+                                [REGISTRATOR_RUNTIME]
       --containerd-namespace NS containerd's namespace (default "default")
-
-Consul agent:
-  -c, --consul ADDR             its HTTP API: host:port, http://host:port or
-                                https://host:port (default 127.0.0.1:8500)
-      --token-file FILE         the ACL token to register with, read from FILE
-      --ca-file FILE            CA certificate for https
-      --cert-file FILE          client certificate for https (with --key-file)
-      --key-file FILE           client key for https
-      --domain DOMAIN           the DNS domain to serve the services in, e.g.
-                                dmarts.app (default: the agent's own); the
-                                bundled agent is started serving it
+                                [REGISTRATOR_CONTAINERD_NAMESPACE]
 
 Services:
-  -t, --tags TAG,...            Consul tags for every service (repeatable); the
-                                protocol (tcp, udp) is always added
+  -t, --tags TAG,...            Consul tags for every service; the protocol is
+                                always added [REGISTRATOR_TAGS]
       --address IP              the host address to register: one IPv4, one
-                                IPv6 (repeatable; default: the agent's address
-                                and the IPv6 address beside it)
+                                IPv6 (default: the agent's address and the IPv6
+                                address beside it) [REGISTRATOR_ADDRESS]
       --check MODE              auto, tcp, ttl or none (default auto: the
                                 container's own health check where it has one,
-                                else TCP to the port)
+                                else TCP to the port) [REGISTRATOR_CHECK]
       --check-interval DUR      how often checks run (default 10s)
+                                [REGISTRATOR_CHECK_INTERVAL]
       --deregister-after DUR    Consul removes a service critical this long, a
                                 safety net (default 10m; 0 never; at least 1m)
+                                [REGISTRATOR_DEREGISTER_AFTER]
       --resync DUR              compare everything this often, besides on every
-                                change (default 1m)
+                                change (default 1m) [REGISTRATOR_RESYNC]
   -i, --ignore                  dry run: log what would change, change nothing
+                                [REGISTRATOR_DRY_RUN]
 
-Bundled Consul agent (the container image):
-      --agent                   start the agent in this container, register
-                                with it, stop it on the way out
-      --agent-bin PATH          (default /bin/consul)
-      --agent-config-dir DIR    its configuration: servers to join, gossip key,
-                                ACL tokens (repeatable; default /consul/config)
-      --agent-data-dir DIR      its state - keep it on a volume (default
-                                /consul/data)
-      --agent-node NAME         its node name (default: the host's name)
-      --agent-bind IP           its address (default: the host's Swarm address,
-                                else the default route's)
+The Consul agent's HTTP API (another agent than the bundled one: no --agent):
+  -c, --consul ADDR             host:port, http://host:port or https://host:port
+                                (default 127.0.0.1:8500) [CONSUL_HTTP_ADDR]
+      --token-file FILE         the registrator's ACL token, read from FILE
+                                [CONSUL_HTTP_TOKEN_FILE]
+      --ca-file FILE            CA certificate for https [CONSUL_CACERT]
+      --cert-file FILE          client certificate for https (with --key-file)
+                                [CONSUL_CLIENT_CERT]
+      --key-file FILE           client key for https [CONSUL_CLIENT_KEY]
 
 Other:
       --debug                   log every event and decision
+                                [REGISTRATOR_DEBUG]
   -v, --version                 print the version
   -h, --help                    print this help
 `
 
 // Main runs the command and returns its exit status: 0, 1 when it failed, 2
-// for a usage error.
+// when it was not given what it needs.
 func Main(args []string, version string, stdout, stderr io.Writer) int {
-	cfg, code, done := Parse(args, version, stdout, stderr)
+	cfg, code, done := Parse(args, os.LookupEnv, version, stdout, stderr)
 	if done {
 		return code
 	}
@@ -112,12 +148,20 @@ func Main(args []string, version string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// Parse reads the command line. done says the command is over - help,
-// version or a usage error - with code its exit status.
-func Parse(args []string, version string, stdout, stderr io.Writer) (cfg config.Config, code int, done bool) {
-	usage := func(format string, a ...any) (config.Config, int, bool) {
-		_, _ = fmt.Fprintf(stderr, "%s: %s\nRun '%s --help' for usage.\n", Name, safe.Text(fmt.Sprintf(format, a...)), Name)
+// Parse reads the command line and the environment (env), and checks
+// everything. done says the command is over - help, version, or not given
+// what it needs - with code its exit status.
+func Parse(args []string, env secret.Lookup, version string, stdout, stderr io.Writer) (cfg config.Config, code int, done bool) {
+	refuse := func(problems []string) (config.Config, int, bool) {
+		_, _ = fmt.Fprintf(stderr, "%s: cannot start:\n", Name)
+		for _, p := range problems {
+			_, _ = fmt.Fprintf(stderr, "  - %s\n", safe.Text(p))
+		}
+		_, _ = fmt.Fprintf(stderr, "Run '%s --help' for every setting.\n", Name)
 		return cfg, 2, true
+	}
+	usage := func(format string, a ...any) (config.Config, int, bool) {
+		return refuse([]string{fmt.Sprintf(format, a...)})
 	}
 	for i, a := range args {
 		if err := safe.Arg(a); err != nil {
@@ -128,9 +172,11 @@ func Parse(args []string, version string, stdout, stderr io.Writer) (cfg config.
 	fs := pflag.NewFlagSet(Name, pflag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
+	label := cfg.LabelKey + "=" + cfg.LabelValue
 	fs.StringVarP(&cfg.Socket, "socket", "s", cfg.Socket, "")
 	fs.StringVar(&cfg.Runtime, "runtime", cfg.Runtime, "")
 	fs.StringVar(&cfg.ContainerdNamespace, "containerd-namespace", cfg.ContainerdNamespace, "")
+	fs.StringVar(&label, "label", label, "")
 	fs.StringVarP(&cfg.Consul, "consul", "c", cfg.Consul, "")
 	fs.StringVar(&cfg.TokenFile, "token-file", "", "")
 	fs.StringVar(&cfg.CAFile, "ca-file", "", "")
@@ -150,6 +196,11 @@ func Parse(args []string, version string, stdout, stderr io.Writer) (cfg config.
 	fs.StringVar(&cfg.AgentDataDir, "agent-data-dir", cfg.AgentDataDir, "")
 	fs.StringVar(&cfg.AgentNode, "agent-node", "", "")
 	fs.StringVar(&cfg.AgentBind, "agent-bind", "", "")
+	fs.StringSliceVar(&cfg.Join, "join", nil, "")
+	fs.StringVar(&cfg.Datacenter, "datacenter", "", "")
+	fs.StringVar(&cfg.EncryptFile, "encrypt-file", "", "")
+	fs.StringVar(&cfg.AgentTokenFile, "agent-token-file", "", "")
+	fs.StringVar(&cfg.DNSTokenFile, "dns-token-file", "", "")
 	fs.BoolVar(&cfg.Debug, "debug", false, "")
 	showVersion := fs.BoolP("version", "v", false, "")
 	showHelp := fs.BoolP("help", "h", false, "")
@@ -166,10 +217,84 @@ func Parse(args []string, version string, stdout, stderr io.Writer) (cfg config.
 	case fs.NArg() > 0:
 		return usage("it takes no arguments, only options (got %q)", fs.Arg(0))
 	}
+
+	// What the command line left unset, the environment may set.
+	var problems []string
+	flags := make([]string, 0, len(config.Env))
+	for f := range config.Env {
+		flags = append(flags, f)
+	}
+	sort.Strings(flags)
+	for _, f := range flags {
+		v, ok := env(config.Env[f])
+		if !ok || v == "" || fs.Changed(f) {
+			continue
+		}
+		if err := safe.Arg(v); err != nil {
+			problems = append(problems, fmt.Sprintf("%s %v", config.Env[f], err))
+			continue
+		}
+		if err := fs.Set(f, v); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", config.Name(f), err))
+		}
+	}
+	if k, v, err := config.ParseLabel(label); err != nil {
+		problems = append(problems, fmt.Sprintf("%s: %v", config.Name("label"), err))
+	} else {
+		cfg.LabelKey, cfg.LabelValue = k, v
+	}
+
+	// The secrets: from the environment, or the files named.
+	var err error
+	read := func(dst *string, name, file string, kind secret.Kind) {
+		if *dst, err = secret.From(env, name, file, kind); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	read(&cfg.Encrypt, "CONSUL_ENCRYPT", cfg.EncryptFile, secret.GossipKey)
+	read(&cfg.AgentToken, "CONSUL_AGENT_TOKEN", cfg.AgentTokenFile, secret.Token)
+	read(&cfg.DNSToken, "CONSUL_DNS_TOKEN", cfg.DNSTokenFile, secret.Token)
+	if v, ok := env("CONSUL_HTTP_TOKEN"); ok && v != "" {
+		if err := secret.Check(v, secret.Token); err != nil {
+			problems = append(problems, "CONSUL_HTTP_TOKEN "+err.Error())
+		} else {
+			cfg.Token = v
+		}
+	}
+	if cfg.TokenFile != "" {
+		if _, err := secret.Read(cfg.TokenFile, secret.Token); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", config.Name("token-file"), err))
+		}
+	}
+	if v, ok := env("CONSUL_LOCAL_CONFIG"); ok {
+		cfg.LocalConfig = v
+	}
+	cfg.AgentConfigFound = cfg.Agent && configFiles(cfg.AgentConfigDirs)
+
 	if err := cfg.Validate(); err != nil {
-		return usage("%s", strings.ReplaceAll(err.Error(), "\n", "; "))
+		problems = append(problems, strings.Split(err.Error(), "\n")...)
+	}
+	if len(problems) > 0 {
+		return refuse(problems)
 	}
 	return cfg, 0, false
+}
+
+// configFiles is whether dirs hold Consul configuration files (.hcl,
+// .json): the agent is then configured there.
+var configFiles = func(dirs []string) bool {
+	for _, d := range dirs {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if n := e.Name(); !e.IsDir() && (strings.HasSuffix(n, ".hcl") || strings.HasSuffix(n, ".json")) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // run starts everything and runs until ctx is done or the bundled agent
@@ -200,7 +325,7 @@ func run(ctx context.Context, cfg config.Config, version string, log *logx.Logge
 		defer proc.Stop(30 * time.Second)
 	}
 
-	c, err := consul.New(consul.Options{Addr: cfg.Consul, TokenFile: cfg.TokenFile, CAFile: cfg.CAFile, CertFile: cfg.CertFile, KeyFile: cfg.KeyFile})
+	c, err := consul.New(consul.Options{Addr: cfg.Consul, TokenFile: cfg.TokenFile, Token: cfg.Token, CAFile: cfg.CAFile, CertFile: cfg.CertFile, KeyFile: cfg.KeyFile})
 	if err != nil {
 		return err
 	}
@@ -215,7 +340,10 @@ func run(ctx context.Context, cfg config.Config, version string, log *logx.Logge
 		}
 		var err error
 		self, err = c.Self(ctx)
-		if errors.Is(err, consul.ErrDenied) {
+		switch {
+		case consul.ServersUnreachable(err):
+			return fmt.Errorf("no Consul server answers the agent yet, and it cannot check the token without one: %w", err)
+		case errors.Is(err, consul.ErrDenied):
 			return backoffStop{fmt.Errorf("the Consul agent refuses the token (it needs agent:read and service:write): %w", err)}
 		}
 		return err
@@ -295,9 +423,27 @@ func startAgent(ctx context.Context, cfg config.Config, rt runtime.Runtime, log 
 		}
 		bind = a
 	}
+	// The agent's configuration from the registrator's settings, in a
+	// directory only this process can read: it holds the secrets.
+	dir, err := os.MkdirTemp("", "consul-agent-")
+	if err != nil {
+		return nil, fmt.Errorf("the Consul agent's configuration: %w", err)
+	}
+	datacenter := cfg.Datacenter
+	if datacenter == "" && !cfg.AgentConfigFound {
+		datacenter = "dc1"
+	}
+	files, err := agent.WriteConfig(dir, agent.Settings{
+		Datacenter: datacenter, Join: cfg.Join, Encrypt: cfg.Encrypt,
+		AgentToken: cfg.AgentToken, DNSToken: cfg.DNSToken, Defaults: !cfg.AgentConfigFound,
+	}, cfg.LocalConfig)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
 	a := agent.Agent{
-		Bin: cfg.AgentBin, ConfigDirs: cfg.AgentConfigDirs, DataDir: cfg.AgentDataDir,
-		Node: node, Bind: bind, Domain: cfg.Domain,
+		Bin: cfg.AgentBin, ConfigDirs: cfg.AgentConfigDirs, ConfigFiles: files, DataDir: cfg.AgentDataDir,
+		Node: node, Bind: bind, Domain: cfg.Domain, Env: agent.Environ(os.Environ()),
 		Stdout: os.Stdout, Stderr: os.Stderr,
 	}
 	if bind.Is4() {
@@ -305,8 +451,10 @@ func startAgent(ctx context.Context, cfg config.Config, rt runtime.Runtime, log 
 	}
 	p, err := a.Start()
 	if err != nil {
+		_ = os.RemoveAll(dir)
 		return nil, err
 	}
+	go func() { <-p.Done(); _ = os.RemoveAll(dir) }()
 	kv := []any{"pid", p.Pid(), "node", node, "bind", bind.String()}
 	if a.IPv6.IsValid() {
 		kv = append(kv, "ipv6", a.IPv6.String())

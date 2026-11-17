@@ -33,13 +33,27 @@ const (
 // ErrDenied is Consul refusing the token (403).
 var ErrDenied = errors.New("permission denied")
 
+// ServersUnreachable is whether err is the agent refusing a token only
+// because no Consul server answers it - at a cold boot, say: it denies
+// everything until one does (as the identity "primary-dc-down"). That
+// passes; a token without the permissions does not.
+func ServersUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	return strings.Contains(m, "primary-dc-down") || strings.Contains(m, "No known Consul servers") ||
+		strings.Contains(m, "ACL Datacenter") || strings.Contains(m, "No cluster leader")
+}
+
 // ErrNotFound is a service or check the agent does not have (404).
 var ErrNotFound = errors.New("not found")
 
 // Options is how to reach the agent.
 type Options struct {
 	Addr      string // host:port or http(s)://host:port
-	TokenFile string
+	TokenFile string // the ACL token, read again whenever the file changes...
+	Token     string // ...or given as it is
 	CAFile    string
 	CertFile  string
 	KeyFile   string
@@ -87,7 +101,7 @@ func New(o Options) (*Client, error) {
 		}
 		tr.TLSClientConfig = tc
 	}
-	c := &Client{hc: &http.Client{Transport: tr, Timeout: 15 * time.Second}, blocking: &http.Client{Transport: tr}, base: u.String(), tokenFile: o.TokenFile}
+	c := &Client{hc: &http.Client{Transport: tr, Timeout: 15 * time.Second}, blocking: &http.Client{Transport: tr}, base: u.String(), tokenFile: o.TokenFile, token: o.Token}
 	if o.TokenFile != "" {
 		if _, err := c.readToken(); err != nil {
 			return nil, err
@@ -100,7 +114,7 @@ func New(o Options) (*Client, error) {
 // token rotated in the file is used from the next request on.
 func (c *Client) readToken() (string, error) {
 	if c.tokenFile == "" {
-		return "", nil
+		return c.token, nil // given as it is, or none
 	}
 	fi, err := os.Stat(c.tokenFile)
 	if err != nil {
