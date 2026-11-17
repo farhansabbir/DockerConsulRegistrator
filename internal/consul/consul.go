@@ -1,0 +1,303 @@
+// Package consul is the part of the Consul agent's HTTP API the registrator
+// uses: the agent's own details, its local services, registering and
+// deregistering, and TTL check updates. It only ever talks to the local
+// agent - the agent's anti-entropy keeps the servers' catalog in step.
+package consul
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/farhansabbir/DockerConsulRegistrator/internal/config"
+	"github.com/farhansabbir/DockerConsulRegistrator/internal/safe"
+)
+
+const (
+	maxBody      = 16 << 20
+	maxTokenFile = 4096
+)
+
+// ErrDenied is Consul refusing the token (403).
+var ErrDenied = errors.New("permission denied")
+
+// ErrNotFound is a service or check the agent does not have (404).
+var ErrNotFound = errors.New("not found")
+
+// Options is how to reach the agent.
+type Options struct {
+	Addr      string // host:port or http(s)://host:port
+	TokenFile string
+	CAFile    string
+	CertFile  string
+	KeyFile   string
+}
+
+// Client talks to one Consul agent.
+type Client struct {
+	hc        *http.Client
+	base      string
+	tokenFile string
+
+	mu    sync.Mutex
+	token string
+	stamp string // the token file's size and time when read
+}
+
+// New returns a client for the agent o names.
+func New(o Options) (*Client, error) {
+	u, err := config.ConsulURL(o.Addr)
+	if err != nil {
+		return nil, err
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil // the local agent, never through a proxy
+	if u.Scheme == "https" {
+		tc := &tls.Config{MinVersion: tls.VersionTLS12}
+		if o.CAFile != "" {
+			pem, err := readSmall(o.CAFile, 1<<20)
+			if err != nil {
+				return nil, fmt.Errorf("--ca-file: %w", err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pem) {
+				return nil, fmt.Errorf("--ca-file: %s holds no PEM certificate", safe.Short(o.CAFile, 80))
+			}
+			tc.RootCAs = pool
+		}
+		if o.CertFile != "" {
+			cert, err := tls.LoadX509KeyPair(o.CertFile, o.KeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("--cert-file/--key-file: %s", safe.Short(err.Error(), 200))
+			}
+			tc.Certificates = []tls.Certificate{cert}
+		}
+		tr.TLSClientConfig = tc
+	}
+	c := &Client{hc: &http.Client{Transport: tr, Timeout: 15 * time.Second}, base: u.String(), tokenFile: o.TokenFile}
+	if o.TokenFile != "" {
+		if _, err := c.readToken(); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
+// readToken is the ACL token, read again whenever its file changed - a
+// token rotated in the file is used from the next request on.
+func (c *Client) readToken() (string, error) {
+	if c.tokenFile == "" {
+		return "", nil
+	}
+	fi, err := os.Stat(c.tokenFile)
+	if err != nil {
+		return "", fmt.Errorf("--token-file: %w", err)
+	}
+	stamp := fmt.Sprint(fi.Size(), fi.ModTime().UnixNano())
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if stamp == c.stamp && c.token != "" {
+		return c.token, nil
+	}
+	b, err := readSmall(c.tokenFile, maxTokenFile)
+	if err != nil {
+		return "", fmt.Errorf("--token-file: %w", err)
+	}
+	tok := strings.TrimSpace(string(b))
+	if tok == "" {
+		return "", fmt.Errorf("--token-file: %s is empty", safe.Short(c.tokenFile, 80))
+	}
+	for i := 0; i < len(tok); i++ {
+		if tok[i] <= ' ' || tok[i] > '~' {
+			return "", fmt.Errorf("--token-file: %s holds more than one token, or characters no token has", safe.Short(c.tokenFile, 80))
+		}
+	}
+	c.token, c.stamp = tok, stamp
+	return tok, nil
+}
+
+// readSmall reads a regular file of at most max bytes.
+func readSmall(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", safe.Short(path, 80))
+	}
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s is larger than %d bytes", safe.Short(path, 80), max)
+	}
+	return b, nil
+}
+
+// Self is the part of /v1/agent/self the registrator reads.
+type Self struct {
+	Config struct {
+		NodeName   string
+		Datacenter string
+		Version    string
+	}
+	Member struct {
+		Name string
+		Addr string // the address the agent advertises
+	}
+	DebugConfig struct {
+		DNSDomain    string // "consul." - the domain its DNS answers name things in
+		DNSAltDomain string
+	}
+}
+
+// Domains are the DNS domains the agent serves: its own (PTR answers name
+// services in it) and its alternative, without the dot at the end.
+func (s Self) Domains() (domain, alt string) {
+	trim := func(d string) string { return strings.TrimSuffix(strings.ToLower(d), ".") }
+	return trim(s.DebugConfig.DNSDomain), trim(s.DebugConfig.DNSAltDomain)
+}
+
+// Self returns the agent's own details.
+func (c *Client) Self(ctx context.Context) (Self, error) {
+	var s Self
+	err := c.do(ctx, http.MethodGet, "/v1/agent/self", nil, &s)
+	return s, err
+}
+
+// Service is a service the agent holds.
+type Service struct {
+	ID      string
+	Service string
+	Tags    []string
+	Meta    map[string]string
+	Address string
+	Port    int
+}
+
+// Services returns the agent's local services by ID: those the token may
+// read.
+func (c *Client) Services(ctx context.Context) (map[string]Service, error) {
+	out := map[string]Service{}
+	err := c.do(ctx, http.MethodGet, "/v1/agent/services", nil, &out)
+	return out, err
+}
+
+// Registration is a service as registered with the agent.
+type Registration struct {
+	ID                string
+	Name              string
+	Tags              []string          `json:",omitempty"`
+	Address           string            `json:",omitempty"`
+	Port              int               `json:",omitempty"`
+	Meta              map[string]string `json:",omitempty"`
+	EnableTagOverride bool
+	Check             *Check `json:",omitempty"`
+}
+
+// Check is the service's one check. Its ID is "service:" and the service's.
+type Check struct {
+	Name                           string
+	Notes                          string `json:",omitempty"`
+	TCP                            string `json:",omitempty"`
+	Interval                       string `json:",omitempty"`
+	Timeout                        string `json:",omitempty"`
+	TTL                            string `json:",omitempty"`
+	Status                         string `json:",omitempty"`
+	DeregisterCriticalServiceAfter string `json:",omitempty"`
+}
+
+// CheckID is the ID Consul gives the check of the service id.
+func CheckID(serviceID string) string { return "service:" + serviceID }
+
+// Register registers r with the agent, replacing what it held under r.ID and
+// its checks.
+func (c *Client) Register(ctx context.Context, r Registration) error {
+	return c.do(ctx, http.MethodPut, "/v1/agent/service/register?replace-existing-checks=true", r, nil)
+}
+
+// Deregister removes the service id from the agent.
+func (c *Client) Deregister(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPut, "/v1/agent/service/deregister/"+url.PathEscape(id), nil, nil)
+}
+
+// UpdateTTL sets a TTL check's status (passing, warning or critical) and
+// output.
+func (c *Client) UpdateTTL(ctx context.Context, checkID, status, output string) error {
+	body := map[string]string{"Status": status, "Output": output}
+	return c.do(ctx, http.MethodPut, "/v1/agent/check/update/"+url.PathEscape(checkID), body, nil)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return err
+	}
+	tok, err := c.readToken()
+	if err != nil {
+		return err
+	}
+	if tok != "" {
+		req.Header.Set("X-Consul-Token", tok)
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("consul: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	name := strings.SplitN(path, "?", 2)[0]
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := safe.Short(strings.TrimSpace(string(b)), 200)
+		switch resp.StatusCode {
+		case http.StatusForbidden:
+			return fmt.Errorf("consul: %s: %w: %s", name, ErrDenied, msg)
+		case http.StatusNotFound:
+			return fmt.Errorf("consul: %s: %w: %s", name, ErrNotFound, msg)
+		}
+		return fmt.Errorf("consul: %s answered %s: %s", name, resp.Status, msg)
+	}
+	if out == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
+		return nil
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return fmt.Errorf("consul: %s: %w", name, err)
+	}
+	if len(b) > maxBody {
+		return fmt.Errorf("consul: %s: the answer is larger than %d bytes", name, maxBody)
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		return fmt.Errorf("consul: %s: the answer is not what Consul sends: %w", name, err)
+	}
+	return nil
+}
