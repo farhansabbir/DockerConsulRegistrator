@@ -340,14 +340,18 @@ func checkDomain(cfg config.Config, self consul.Self, log *logx.Logger) (string,
 		primary, cfg.Domain, cfg.Domain, primary)
 }
 
+// quietFor is how long retry waits before it says why.
+var quietFor = 5 * time.Second
+
 // backoffStop is an error retry does not retry.
 type backoffStop struct{ error }
 
-// retry runs f until it succeeds, waiting longer each time up to 30 s, and
-// says why it waits now and then.
+// retry runs f until it succeeds, waiting longer each time up to 30 s. It
+// says why it waits once that has gone on for quietFor - an agent starting
+// takes a second or so - and every 30 s after.
 func retry(ctx context.Context, log *logx.Logger, waiting string, f func() error) error {
 	wait := time.Second
-	var said time.Time
+	said := time.Now().Add(quietFor - 30*time.Second)
 	for {
 		err := f()
 		if err == nil {

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -97,5 +99,39 @@ func TestCheckDomain(t *testing.T) {
 	}
 	if _, err := checkDomain(cfg, self("consul.", ""), log); err == nil || !strings.Contains(err.Error(), `domain = "dmarts.app"`) {
 		t.Errorf("not served: %v", err)
+	}
+}
+
+func TestRetryIsQuietAtFirst(t *testing.T) {
+	var out bytes.Buffer
+	log := logx.New(&out, "t")
+	n := 0
+	err := retry(context.Background(), log, "waiting", func() error {
+		n++
+		if n < 2 {
+			return errors.New("not yet")
+		}
+		return nil
+	})
+	if err != nil || strings.Contains(out.String(), "waiting") {
+		t.Fatalf("a quick success logged: %q, %v", out.String(), err)
+	}
+	old := quietFor
+	quietFor = 0
+	defer func() { quietFor = old }()
+	n = 0
+	_ = retry(context.Background(), log, "waiting", func() error {
+		n++
+		if n < 2 {
+			return errors.New("not yet")
+		}
+		return nil
+	})
+	if !strings.Contains(out.String(), "waiting") {
+		t.Fatalf("a wait past quietFor not logged: %q", out.String())
+	}
+	stop := retry(context.Background(), log, "waiting", func() error { return backoffStop{errors.New("refused")} })
+	if stop == nil || stop.Error() != "refused" {
+		t.Fatalf("backoffStop: %v", stop)
 	}
 }
