@@ -1,0 +1,63 @@
+# The registrator on every node of a Swarm, each with its Consul agent.
+#
+#   cp agent.hcl.example agent.hcl        # your Consul servers, datacenter
+#   cp secrets.hcl.example secrets.hcl    # gossip key, agent and DNS tokens
+#   printf '%s\n' "<the registrator's token>" > registrator.token
+#   IMAGE=<registry>/docker-consul-registrator:<version> DOMAIN=dmarts.app \
+#     docker stack deploy -c stack.yml consul
+#
+# Run it on a manager, or from anywhere with docker -H ssh://<manager>: the
+# three files are read where the command runs, and become a Swarm config and
+# Swarm secrets. Every node must be able to pull IMAGE; for an image loaded on
+# each node instead, add --resolve-image never.
+#
+# Swarm configs and secrets cannot change in place: after editing one of the
+# files, docker stack rm consul, and deploy again.
+services:
+  registrator:
+    image: ${IMAGE:?set IMAGE to the registrator's image}
+    command: ["--agent", "--token-file", "/run/secrets/registrator.token", "--domain", "${DOMAIN:-consul}"]
+    networks: [hostnet]
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: volume
+        source: agent-data
+        target: /consul/data
+    configs:
+      - source: agent
+        target: /consul/config/agent.hcl
+    secrets:
+      - source: agent-secrets
+        target: /consul/config/secrets.hcl
+        mode: 0400
+      - source: registrator-token
+        target: registrator.token
+        mode: 0400
+    deploy:
+      mode: global
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        order: stop-first
+
+networks:
+  hostnet:
+    external: true
+    name: host
+
+volumes:
+  agent-data:
+    name: consul-agent-data # the agent's state, one per node: keeps its node ID
+
+configs:
+  agent:
+    file: ./agent.hcl
+
+secrets:
+  agent-secrets:
+    file: ./secrets.hcl
+  registrator-token:
+    file: ./registrator.token

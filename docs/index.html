@@ -222,14 +222,13 @@ $ dig +short web.service.dmarts.app SRV
   docker-consul-registrator:VERSION \
   --agent --token-file /consul/config/registrator.token --domain dmarts.app</code></pre>
   <h3>A Swarm, one task per node</h3>
-<pre><code>docker service create --name consul-registrator --mode global --network host \
-  --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
-  --mount type=volume,src=consul-agent-data,dst=/consul/data \
-  --config src=consul-agent,target=/consul/config/agent.hcl \
-  --secret src=consul-agent-secrets,target=/consul/config/secrets.hcl \
-  --secret src=consul-registrator-token,target=registrator.token \
-  docker-consul-registrator:VERSION \
-  --agent --token-file /run/secrets/registrator.token --domain dmarts.app</code></pre>
+  <p>With <a href="https://github.com/farhansabbir/DockerConsulRegistrator/blob/main/deploy/stack.yml"><code>deploy/stack.yml</code></a>, on a manager or from anywhere with <code>docker -H ssh://&lt;manager&gt;</code>:</p>
+<pre><code>cp agent.hcl.example agent.hcl        # your Consul servers, datacenter
+cp secrets.hcl.example secrets.hcl    # gossip key, agent and DNS tokens
+printf '%s\n' "&lt;the registrator's token&gt;" &gt; registrator.token
+IMAGE=&lt;registry&gt;/docker-consul-registrator:&lt;version&gt; DOMAIN=dmarts.app \
+  docker stack deploy -c stack.yml consul</code></pre>
+  <p>The three files become a Swarm config and Swarm secrets. Swarm cannot change them in place: after editing one, <code>docker stack rm consul</code> and deploy again.</p>
   <p class="note">Swarm's routing-mesh ports can only be read on a manager. On workers, publish with <code>mode=host</code>: each task is then registered at its own node.</p>
   <h3>The agent's configuration</h3>
 <pre><code># /consul/config/agent.hcl

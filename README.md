@@ -100,17 +100,22 @@ nerdctl are registered and others are reported. It reads one namespace
 (`--containerd-namespace`, default `default` - nerdctl's). It takes the
 host's name from its own, hence `--uts host`.
 
-**Swarm**, as a global service - see [deploy/swarm.sh](deploy/swarm.sh):
+**Swarm**, on every node - [deploy/stack.yml](deploy/stack.yml):
 
 ```
-docker service create --name consul-registrator --mode global --network host \
-  --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
-  --mount type=volume,src=consul-agent-data,dst=/consul/data \
-  --config src=consul-agent,target=/consul/config/agent.hcl \
-  --secret src=consul-agent-secrets,target=/consul/config/secrets.hcl \
-  --secret src=consul-registrator-token,target=registrator.token \
-  docker-consul-registrator:VERSION --agent --token-file /run/secrets/registrator.token --domain dmarts.app
+cd deploy
+cp agent.hcl.example agent.hcl        # your Consul servers, datacenter
+cp secrets.hcl.example secrets.hcl    # gossip key, agent and DNS tokens
+printf '%s\n' "<the registrator's token>" > registrator.token
+IMAGE=<registry>/docker-consul-registrator:<version> DOMAIN=dmarts.app \
+  docker stack deploy -c stack.yml consul
 ```
+
+The three files become a Swarm config and Swarm secrets; `.gitignore` keeps
+the filled-in copies out of the repository. Run it on a manager, or from
+anywhere with `docker -H ssh://<manager>`. Swarm cannot change a config or
+secret in place: after editing one, `docker stack rm consul` and deploy
+again.
 
 Swarm's routing-mesh ports can only be read on a manager; on workers,
 publish with `mode=host` (each task is then registered at its own node).

@@ -1,1 +1,5 @@
 dist/
+# filled-in copies of the examples: secrets
+deploy/agent.hcl
+deploy/secrets.hcl
+deploy/registrator.token
