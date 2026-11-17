@@ -89,59 +89,90 @@ agent serves it, and refuses to start, saying what to add, when it does not.
 
 ## Running it
 
-It needs the host's network (`--network host`) and the runtime's socket at
-the usual path; `--socket auto` (the default) finds it there:
+**What you need:**
 
-| Runtime | Mount |
-|---|---|
-| Docker | `-v /var/run/docker.sock:/var/run/docker.sock` |
-| Podman (rootful) | `-v /run/podman/podman.sock:/run/podman/podman.sock` |
-| Podman (rootless) | `-v $XDG_RUNTIME_DIR/podman/podman.sock:/run/podman/podman.sock` |
-| containerd | `-v /run/containerd/containerd.sock:/run/containerd/containerd.sock --uts host` |
+1. **A Consul cluster to join** - its servers' addresses and datacenter. With
+   ACLs on, its gossip key and three tokens: the registrator's, the agents'
+   and one for DNS (see [Consul ACLs](#consul-acls)).
+2. **The image where your hosts can pull it** - a registry they reach.
+3. **Three files in [deploy/](deploy/):** `agent.hcl` (from
+   `agent.hcl.example`: servers, datacenter), `secrets.hcl` (from
+   `secrets.hcl.example`: gossip key, agent and DNS tokens) and
+   `registrator.token`. `.gitignore` keeps them out of the repository.
 
-The socket is identified by how it answers: the Engine API's `/_ping` for
-Docker and Podman (Podman says Libpod), containerd's gRPC version call for
-containerd. `--runtime` insists on one.
+**Then, from `deploy/`:**
+
+```
+IMAGE=<registry>/docker-consul-registrator:<version> DOMAIN=dmarts.app ./deploy.sh
+```
+
+- **on a Swarm manager:** it deploys [stack.yml](deploy/stack.yml) - one task
+  on every node;
+- **on any other Docker host:** one container on that host;
+- **Podman:** `DOCKER=podman ./deploy.sh` (rootful, or rootless with
+  `systemctl --user enable --now podman.socket`);
+- **containerd:** `DOCKER=nerdctl ./deploy.sh`.
+
+Run it again after changing a file or the image: it replaces what it
+started. `DRY_RUN=1` prints what it would run. On a Swarm, configs and
+secrets are named after their content - Swarm cannot change them in place -
+so a changed file simply replaces the old one.
+
+**Label what to register:**
+
+```
+docker run -d -l consul=yes -p 8080:80 --name web nginx
+docker service create --label consul=yes --publish 8181:80 --replicas 3 --name web-svc nginx
+```
+
+**Ask DNS** - on any host running it, its agent answers on 127.0.0.1:8600:
+
+```
+dig @127.0.0.1 -p 8600 web.service.dmarts.app
+```
+
+For every program on the host to resolve these names, have its resolver
+send the domain to the agent - with systemd-resolved
+(`/etc/systemd/resolved.conf.d/consul.conf`, then `systemctl restart
+systemd-resolved`):
+
+```
+[Resolve]
+DNS=127.0.0.1:8600
+Domains=~dmarts.app
+```
+
+or with dnsmasq: `server=/dmarts.app/127.0.0.1#8600`. Add your network's
+reverse zone too (`~1.168.192.in-addr.arpa`, or
+`server=/1.168.192.in-addr.arpa/127.0.0.1#8600`) for PTR answers.
+
+**What deploy.sh runs**, should you run it yourself: the runtime's socket is
+mounted at its usual path (`/var/run/docker.sock`, `/run/podman/podman.sock`,
+`/run/containerd/containerd.sock`), where the registrator finds it and tells
+the runtime by how it answers:
+
+```
+docker run -d --name consul-registrator --restart unless-stopped --network host --hostname "$(hostname)" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v consul-agent-data:/consul/data \
+  -v "$PWD/agent.hcl:/consul/config/agent.hcl:ro" \
+  -v "$PWD/secrets.hcl:/consul/config/secrets.hcl:ro" \
+  -v "$PWD/registrator.token:/run/secrets/registrator.token:ro" \
+  <image> --agent --token-file /run/secrets/registrator.token --domain dmarts.app
+```
 
 **containerd** knows nothing of published ports: the registrator reads them
 from the label nerdctl writes (`nerdctl/ports`), so containers made with
 nerdctl are registered and others are reported. It reads one namespace
-(`--containerd-namespace`, default `default` - nerdctl's). It takes the
-host's name from its own, hence `--uts host`.
+(`--containerd-namespace`, default `default` - nerdctl's).
 
-**Swarm**, on every node - [deploy/stack.yml](deploy/stack.yml):
-
-```
-cd deploy
-cp agent.hcl.example agent.hcl        # your Consul servers, datacenter
-cp secrets.hcl.example secrets.hcl    # gossip key, agent and DNS tokens
-printf '%s\n' "<the registrator's token>" > registrator.token
-IMAGE=<registry>/docker-consul-registrator:<version> DOMAIN=dmarts.app \
-  docker stack deploy -c stack.yml consul
-```
-
-The three files become a Swarm config and Swarm secrets; `.gitignore` keeps
-the filled-in copies out of the repository. Run it on a manager, or from
-anywhere with `docker -H ssh://<manager>`. Swarm cannot change a config or
-secret in place: after editing one, `docker stack rm consul` and deploy
-again.
-
-Only a Swarm manager can read the Swarm's services - their labels and
+**Swarm:** only a manager can read the Swarm's services - their labels and
 routing-mesh ports - so the registrators on managers write the services to
 register into Consul's KV store (`docker-consul-registrator/swarm/`), and
-those on workers read them from there. A routing-mesh task is registered
-at its node's IPv4 address and published port, one instance per task, its
-check passing while it runs (or following its health check); a task
-published with `mode=host` is registered like any container.
-
-**A single host:**
-
-```
-docker run -d --name consul-registrator --network host --restart unless-stopped \
-  -v /var/run/docker.sock:/var/run/docker.sock -v consul-agent-data:/consul/data \
-  -v /etc/consul-agent:/consul/config:ro \
-  docker-consul-registrator:VERSION --agent --token-file /consul/config/registrator.token --domain dmarts.app
-```
+those on workers read them there. A routing-mesh task is registered at its
+node's IPv4 address and published port, one instance per task, its check
+passing while it runs (or following its health check); a task published
+with `mode=host` is registered like any container.
 
 ## Consul ACLs
 

@@ -213,35 +213,51 @@ $ dig +short web.service.dmarts.app SRV
 
 <section id="run">
   <h2>Run it</h2>
-  <p>It needs the host's network and the runtime's socket. With <code>--agent</code> - the image's default - it starts its own Consul agent; give the agent its configuration (servers to join, gossip key, tokens) in <code>/consul/config</code>, and its state a volume.</p>
-  <h3>A single host</h3>
-<pre><code>docker run -d --name consul-registrator --network host --restart unless-stopped \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v consul-agent-data:/consul/data \
-  -v /etc/consul-agent:/consul/config:ro \
-  docker-consul-registrator:VERSION \
-  --agent --token-file /consul/config/registrator.token --domain dmarts.app</code></pre>
-  <h3>A Swarm, one task per node</h3>
-  <p>With <a href="https://github.com/farhansabbir/DockerConsulRegistrator/blob/main/deploy/stack.yml"><code>deploy/stack.yml</code></a>, on a manager or from anywhere with <code>docker -H ssh://&lt;manager&gt;</code>:</p>
-<pre><code>cp agent.hcl.example agent.hcl        # your Consul servers, datacenter
-cp secrets.hcl.example secrets.hcl    # gossip key, agent and DNS tokens
-printf '%s\n' "&lt;the registrator's token&gt;" &gt; registrator.token
-IMAGE=&lt;registry&gt;/docker-consul-registrator:&lt;version&gt; DOMAIN=dmarts.app \
-  docker stack deploy -c stack.yml consul</code></pre>
-  <p>The three files become a Swarm config and Swarm secrets. Swarm cannot change them in place: after editing one, <code>docker stack rm consul</code> and deploy again.</p>
-  <p class="note">Only Swarm managers can read the Swarm's services, so the registrators on managers share the ones to register - and their routing-mesh ports - through Consul's KV store, and the workers' registrators read them there. A manager must run the registrator; a global service always does.</p>
+  <p><strong>You need:</strong> a Consul cluster to join (with ACLs on: its gossip key and three tokens - see <a href="#acl">ACLs</a>), the image where your hosts can pull it, and three files next to <code>deploy.sh</code>:</p>
+  <ul>
+    <li><code>agent.hcl</code> - your Consul servers and datacenter (from <code>agent.hcl.example</code>);</li>
+    <li><code>secrets.hcl</code> - the gossip key, the agents' and the DNS token (from <code>secrets.hcl.example</code>);</li>
+    <li><code>registrator.token</code> - the registrator's token.</li>
+  </ul>
+  <h3>Start it</h3>
+<pre><code>IMAGE=&lt;registry&gt;/docker-consul-registrator:&lt;version&gt; DOMAIN=dmarts.app ./deploy.sh</code></pre>
+  <div class="table">
+  <table>
+    <thead><tr><th>Where</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td>a Swarm manager</td><td>deploys the stack: one task on every node</td></tr>
+      <tr><td>any other Docker host</td><td>one container on this host</td></tr>
+      <tr><td>Podman</td><td><code>DOCKER=podman ./deploy.sh</code> - rootful, or rootless with the user's <code>podman.socket</code></td></tr>
+      <tr><td>containerd</td><td><code>DOCKER=nerdctl ./deploy.sh</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Run it again after changing a file or the image: it replaces what it started. <code>DRY_RUN=1</code> prints what it would run.</p>
+  <h3>Label what to register</h3>
+<pre><code>docker run -d -l consul=yes -p 8080:80 --name web nginx
+docker service create --label consul=yes --publish 8181:80 --replicas 3 --name web-svc nginx</code></pre>
+  <h3>Ask DNS</h3>
+  <p>Every host running it answers on 127.0.0.1:8600:</p>
+<pre><code>dig @127.0.0.1 -p 8600 web.service.dmarts.app</code></pre>
+  <p>For every program on the host to resolve these names, send the domain - and your network's reverse zone, for PTR - to the agent. With systemd-resolved, in <code>/etc/systemd/resolved.conf.d/consul.conf</code>:</p>
+<pre><code>[Resolve]
+DNS=127.0.0.1:8600
+Domains=~dmarts.app ~1.168.192.in-addr.arpa</code></pre>
+  <p>or with dnsmasq: <code>server=/dmarts.app/127.0.0.1#8600</code>.</p>
+  <p class="note">Only Swarm managers can read the Swarm's services, so the registrators on managers share the ones to register - and their routing-mesh ports - through Consul's KV store, and the workers' registrators read them there. A manager must run the registrator; the stack's global service always does.</p>
   <h3>The agent's configuration</h3>
-<pre><code># /consul/config/agent.hcl
-datacenter  = "dc1"
-retry_join  = ["consul-server-1", "consul-server-2", "consul-server-3"]
-client_addr = "127.0.0.1"
+<pre><code># agent.hcl
+datacenter         = "dc1"
+retry_join         = ["consul-server-1", "consul-server-2", "consul-server-3"]
+client_addr        = "127.0.0.1"
+leave_on_terminate = true
 dns_config { only_passing = true }
 acl {
   enabled        = true
   default_policy = "deny"
 }
 
-# /consul/config/secrets.hcl - keep it secret
+# secrets.hcl - keep it secret
 encrypt = "&lt;gossip key&gt;"
 acl {
   tokens {
