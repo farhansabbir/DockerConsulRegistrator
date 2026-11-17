@@ -255,6 +255,14 @@ make image       # the container image
 make docs-serve  # the documentation page at http://127.0.0.1:8000
 ```
 
+The Image workflow ([.github/workflows/image.yml](.github/workflows/image.yml))
+runs the checks, then builds the image for amd64 and arm64 and pushes it to
+`ghcr.io/farhansabbir/docker-consul-registrator`: `:latest` and
+`:<commit>` from every push to `main`, `:X.Y.Z` and `:X.Y` from a version
+tag `vX.Y.Z`. The package is as visible as the repository: while that is
+private, hosts pull after `docker login ghcr.io` with a token that may
+read packages.
+
 The documentation page, [docs/index.html](docs/index.html), is one
 self-contained file. The Pages workflow checks it and publishes it on GitHub
 Pages whenever it changes on `main`.
