@@ -68,3 +68,57 @@ func TestConvert(t *testing.T) {
 		t.Fatal("a paused container counts as running")
 	}
 }
+
+func TestWatchFiltersHere(t *testing.T) {
+	endpoint := serveSocket(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/_ping":
+			w.Header().Set("Api-Version", "1.45")
+		default:
+			for _, line := range []string{
+				`{"Type":"container","Action":"start","Actor":{"Attributes":{"consul":"yes"}}}`,
+				`{"Type":"container","Action":"start","Actor":{"Attributes":{"name":"unrelated"}}}`,
+				`{"Type":"container","Action":"exec_start: wget","Actor":{"Attributes":{"consul":"yes"}}}`,
+				`{"Type":"container","Action":"die","Actor":{"Attributes":{"com.docker.swarm.service.id":"s1"}}}`,
+				`{"Type":"service","Action":"update","Actor":{"ID":"s1"}}`,
+			} {
+				_, _ = fmt.Fprintln(w, line)
+			}
+		}
+	}))
+	e, err := Open(context.Background(), endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	_ = e.Watch(context.Background(), []string{"consul", "com.docker.swarm.service.id"}, func() {}, func(s string) { got = append(got, s) })
+	if strings.Join(got, "|") != "start|die|service update" {
+		t.Fatalf("changes: %q", got)
+	}
+}
+
+func TestSwarmServices(t *testing.T) {
+	endpoint := serveSocket(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/_ping":
+			w.Header().Set("Api-Version", "1.45")
+		case "/v1.45/services":
+			_, _ = fmt.Fprint(w, `[{"ID":"svc1","Spec":{"Name":"web-svc","Labels":{"consul":"yes"},"TaskTemplate":{"ContainerSpec":{"Labels":{"a":"b"}}}},
+				"Endpoint":{"Ports":[{"Protocol":"tcp","TargetPort":80,"PublishedPort":8181,"PublishMode":"ingress"},
+				{"Protocol":"udp","TargetPort":53,"PublishedPort":5353,"PublishMode":"host"},{"TargetPort":0,"PublishedPort":1}]}}]`)
+		}
+	}))
+	e, err := Open(context.Background(), endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.SwarmServices(context.Background())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("SwarmServices = %+v, %v", got, err)
+	}
+	s := got[0]
+	if s.Name != "web-svc" || s.Labels["consul"] != "yes" || s.ContainerLabels["a"] != "b" ||
+		fmt.Sprint(s.Ports) != "[{tcp 80  8181 ingress} {udp 53  5353 host}]" {
+		t.Fatalf("service = %+v", s)
+	}
+}

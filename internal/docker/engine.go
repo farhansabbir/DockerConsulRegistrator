@@ -60,19 +60,33 @@ func (e *Engine) Host(ctx context.Context) (runtime.Host, error) {
 	if i.Swarm.LocalNodeState == "active" {
 		h.SwarmAddr = i.Swarm.NodeAddr
 		h.SwarmManager = i.Swarm.ControlAvailable
+		if i.Swarm.Cluster != nil {
+			h.SwarmCluster = i.Swarm.Cluster.ID
+		}
 	}
 	return h, nil
 }
 
-// Containers returns the running containers that carry label.
-func (e *Engine) Containers(ctx context.Context, label string) ([]runtime.Container, error) {
-	list, err := e.c.Containers(ctx, label)
-	if err != nil {
-		return nil, err
+// Containers returns the running containers that carry any of labels.
+func (e *Engine) Containers(ctx context.Context, labels ...string) ([]runtime.Container, error) {
+	seen := map[string]bool{}
+	var ids []string
+	for _, label := range labels {
+		list, err := e.c.Containers(ctx, label)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range list {
+			if !seen[s.ID] {
+				seen[s.ID] = true
+				ids = append(ids, s.ID)
+			}
+		}
 	}
-	out := make([]runtime.Container, 0, len(list))
-	for _, s := range list {
-		c, err := e.c.Inspect(ctx, s.ID)
+	sort.Strings(ids)
+	out := make([]runtime.Container, 0, len(ids))
+	for _, id := range ids {
+		c, err := e.c.Inspect(ctx, id)
 		if errors.Is(err, ErrNotFound) {
 			continue // gone since the list
 		}
@@ -144,43 +158,64 @@ func portKey(k string) (port int, proto string, ok bool) {
 	return 0, "", false
 }
 
-// Watch streams the changes to the containers that carry label. Health
-// checks run as execs; their exec events are left out.
-func (e *Engine) Watch(ctx context.Context, label string, opened func(), changed func(string)) error {
-	return e.c.Events(ctx, label, opened, func(ev Event) {
-		if strings.HasPrefix(ev.Action, "exec_") {
-			return
+// Watch streams the changes to the containers that carry any of labels,
+// and to Swarm services (only managers see those). The label filter is
+// applied here, not by the daemon: the daemon takes one label filter, and a
+// container may carry any of them. Health checks run as execs; their exec
+// events are left out.
+func (e *Engine) Watch(ctx context.Context, labels []string, opened func(), changed func(string)) error {
+	return e.c.Events(ctx, []string{"container", "service"}, opened, func(ev Event) {
+		switch {
+		case ev.Type == "service":
+			changed("service " + ev.Action)
+		case strings.HasPrefix(ev.Action, "exec_"):
+		default:
+			for _, l := range labels {
+				if _, ok := ev.Actor.Attributes[l]; ok {
+					changed(ev.Action)
+					return
+				}
+			}
 		}
-		changed(ev.Action)
 	})
 }
 
-// Ingress returns the ports a Swarm service publishes through the routing
-// mesh. Only a Docker manager can answer.
-func (e *Engine) Ingress(ctx context.Context, serviceID string) ([]runtime.Port, error) {
+// SwarmServices returns the Swarm's services. Only a Docker manager can
+// answer.
+func (e *Engine) SwarmServices(ctx context.Context) ([]runtime.SwarmService, error) {
 	if e.kind != runtime.Docker {
 		return nil, runtime.ErrUnsupported
 	}
-	svc, err := e.c.Service(ctx, serviceID)
+	list, err := e.c.Services(ctx)
 	if err != nil {
-		if strings.Contains(err.Error(), "not a swarm manager") {
-			return nil, fmt.Errorf("%w: this node is a Swarm worker", runtime.ErrUnsupported)
+		if strings.Contains(err.Error(), "not a swarm manager") || strings.Contains(err.Error(), "not part of a swarm") {
+			return nil, fmt.Errorf("%w: %v", runtime.ErrUnsupported, err)
 		}
 		return nil, err
 	}
-	var out []runtime.Port
-	for _, p := range svc.Endpoint.Ports {
-		if p.PublishMode != "" && p.PublishMode != "ingress" {
-			continue // host mode: the task's container shows it
+	out := make([]runtime.SwarmService, 0, len(list))
+	for _, svc := range list {
+		s := runtime.SwarmService{
+			ID:              svc.ID,
+			Name:            svc.Spec.Name,
+			Labels:          svc.Spec.Labels,
+			ContainerLabels: svc.Spec.TaskTemplate.ContainerSpec.Labels,
 		}
-		proto := strings.ToLower(p.Protocol)
-		if proto == "" {
-			proto = "tcp"
+		for _, p := range svc.Endpoint.Ports {
+			proto := strings.ToLower(p.Protocol)
+			if proto == "" {
+				proto = "tcp"
+			}
+			mode := p.PublishMode
+			if mode == "" {
+				mode = "ingress"
+			}
+			if p.PublishedPort < 1 || p.PublishedPort > 65535 || p.TargetPort < 1 || p.TargetPort > 65535 {
+				continue
+			}
+			s.Ports = append(s.Ports, runtime.Port{Proto: proto, Target: p.TargetPort, HostPort: p.PublishedPort, Mode: mode})
 		}
-		if p.PublishedPort < 1 || p.PublishedPort > 65535 || p.TargetPort < 1 || p.TargetPort > 65535 {
-			continue
-		}
-		out = append(out, runtime.Port{Proto: proto, Target: p.TargetPort, HostPort: p.PublishedPort})
+		out = append(out, s)
 	}
 	return out, nil
 }

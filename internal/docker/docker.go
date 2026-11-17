@@ -38,7 +38,6 @@ var ErrNotFound = errors.New("not found")
 
 var (
 	containerID = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
-	serviceID   = regexp.MustCompile(`^[0-9a-z]{1,64}$`)
 )
 
 // Client talks to one Docker daemon.
@@ -139,6 +138,9 @@ type Info struct {
 		NodeAddr         string
 		LocalNodeState   string // "active" in a Swarm
 		ControlAvailable bool   // a manager
+		Cluster          *struct {
+			ID string // the Swarm's; managers only
+		}
 	}
 }
 
@@ -213,7 +215,13 @@ func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
 type Service struct {
 	ID   string
 	Spec struct {
-		Name string
+		Name         string
+		Labels       map[string]string
+		TaskTemplate struct {
+			ContainerSpec struct {
+				Labels map[string]string
+			}
+		}
 	}
 	Endpoint struct {
 		Ports []EndpointPort
@@ -228,13 +236,10 @@ type EndpointPort struct {
 	PublishMode   string // ingress (the routing mesh) or host
 }
 
-// Service returns a Swarm service. Only managers can answer.
-func (c *Client) Service(ctx context.Context, id string) (Service, error) {
-	var out Service
-	if !serviceID.MatchString(id) {
-		return out, fmt.Errorf("docker: %q is not a service ID", safe.Short(id, 70))
-	}
-	err := c.get(ctx, "/services/"+id, nil, &out)
+// Services returns the Swarm's services. Only managers can answer.
+func (c *Client) Services(ctx context.Context) ([]Service, error) {
+	var out []Service
+	err := c.get(ctx, "/services", nil, &out)
 	return out, err
 }
 
@@ -248,11 +253,11 @@ type Event struct {
 	}
 }
 
-// Events streams the events of the containers that carry label, calling
-// opened once the daemon accepted the stream and onEvent for each event. It
-// returns when the stream ends: an error, or nil when ctx is done.
-func (c *Client) Events(ctx context.Context, label string, opened func(), onEvent func(Event)) error {
-	f, _ := json.Marshal(map[string][]string{"type": {"container"}, "label": {label}})
+// Events streams the daemon's events of the given types, calling opened
+// once the daemon accepted the stream and onEvent for each event. It returns
+// when the stream ends: an error, or nil when ctx is done.
+func (c *Client) Events(ctx context.Context, types []string, opened func(), onEvent func(Event)) error {
+	f, _ := json.Marshal(map[string][]string{"type": types})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url("/events", url.Values{"filters": {string(f)}}), nil)
 	if err != nil {
 		return err

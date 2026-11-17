@@ -178,7 +178,7 @@ $ dig +short web.service.dmarts.app SRV
     <div class="box"><b>Consul servers</b><span>kept in step by the agent</span></div>
   </div>
   <ul>
-    <li>For every running container labelled <code>consul=yes</code>: one Consul service instance <strong>per published port and address family</strong>.</li>
+    <li>For every running container labelled <code>consul=yes</code> - or a task of a Swarm service labelled so: one Consul service instance <strong>per published port and address family</strong>, registered by the node it runs on, at that node's address.</li>
     <li>It compares on every change the runtime reports, and every minute in case one was missed; when the runtime restarts, it follows it again.</li>
     <li>It only touches the services it registered (<code>registered-by = docker-consul-registrator</code> in their metadata). Only <code>consul=yes</code> counts - <code>consul=true</code> is reported, not registered.</li>
     <li><strong>Health:</strong> a container's own health check becomes a TTL check (critical while starting or unhealthy, passing when healthy). Other TCP ports get a TCP check.</li>
@@ -201,12 +201,12 @@ $ dig +short web.service.dmarts.app SRV
     </tbody>
   </table>
   </div>
-  <h3>Service names</h3>
+  <h3>What is registered, and its name</h3>
   <ul>
-    <li>a Swarm task: its service's name (<code>shop_web</code> becomes <code>shop-web</code>);</li>
-    <li>a Compose container: <code>&lt;project&gt;-&lt;service&gt;</code>;</li>
-    <li>otherwise the container's name;</li>
-    <li>more than one port: one service per port - <code>web-80</code>, <code>web-443</code>.</li>
+    <li><strong>a Swarm service</strong> labelled <code>consul=yes</code> - on the service (<code>--label</code>) or its containers (<code>--container-label</code>): each node registers its own tasks as instances of the service, named after it (<code>shop_web</code> becomes <code>shop-web</code>), at its own address;</li>
+    <li><strong>any other container</strong> labelled <code>consul=yes</code>: a service of its own, named after the container;</li>
+    <li>more than one port: one instance per port under the one name, each tagged <code>port-&lt;n&gt;</code>;</li>
+    <li>a stopped container: its node deregisters its instances, and only those.</li>
   </ul>
   <p>Names are always DNS labels. Consul's names always hold <code>.service.</code>: a service is <code>web.service.dmarts.app</code>, not <code>web.dmarts.app</code>.</p>
 </section>
@@ -229,7 +229,7 @@ printf '%s\n' "&lt;the registrator's token&gt;" &gt; registrator.token
 IMAGE=&lt;registry&gt;/docker-consul-registrator:&lt;version&gt; DOMAIN=dmarts.app \
   docker stack deploy -c stack.yml consul</code></pre>
   <p>The three files become a Swarm config and Swarm secrets. Swarm cannot change them in place: after editing one, <code>docker stack rm consul</code> and deploy again.</p>
-  <p class="note">Swarm's routing-mesh ports can only be read on a manager. On workers, publish with <code>mode=host</code>: each task is then registered at its own node.</p>
+  <p class="note">Only Swarm managers can read the Swarm's services, so the registrators on managers share the ones to register - and their routing-mesh ports - through Consul's KV store, and the workers' registrators read them there. A manager must run the registrator; a global service always does.</p>
   <h3>The agent's configuration</h3>
 <pre><code># /consul/config/agent.hcl
 datacenter  = "dc1"
@@ -290,6 +290,9 @@ acl {
 }
 agent_prefix "" {
   policy = "read"
+}
+key_prefix "docker-consul-registrator/" {
+  policy = "write"
 }</code></pre>
     </div>
     <div>

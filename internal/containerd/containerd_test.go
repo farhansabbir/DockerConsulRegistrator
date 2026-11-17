@@ -127,7 +127,7 @@ func TestContainers(t *testing.T) {
 		t.Fatalf("containers: %+v", cs)
 	}
 	web := cs[0]
-	if web.Name != "web-1" || !web.Running || fmt.Sprint(web.Ports) != "[{tcp 80 0.0.0.0 8080}]" {
+	if web.Name != "web-1" || !web.Running || fmt.Sprint(web.Ports) != "[{tcp 80 0.0.0.0 8080 }]" {
 		t.Fatalf("web-1 = %+v", web)
 	}
 	if cs[1].Running {
@@ -136,8 +136,8 @@ func TestContainers(t *testing.T) {
 	if h, _ := r.Host(context.Background()); h.Name != "docker1" || h.SwarmAddr != "" {
 		t.Fatalf("Host = %+v", h)
 	}
-	if _, err := r.Ingress(context.Background(), "x"); err != runtime.ErrUnsupported {
-		t.Fatalf("Ingress = %v", err)
+	if _, err := r.SwarmServices(context.Background()); err != runtime.ErrUnsupported {
+		t.Fatalf("SwarmServices = %v", err)
 	}
 }
 
@@ -149,7 +149,7 @@ func TestWatchLeavesExecsOut(t *testing.T) {
 	defer func() { _ = r.Close() }()
 	var got []string
 	opened := false
-	err = r.Watch(context.Background(), "consul", func() { opened = true }, func(s string) { got = append(got, s) })
+	err = r.Watch(context.Background(), []string{"consul"}, func() { opened = true }, func(s string) { got = append(got, s) })
 	if err == nil || !opened {
 		t.Fatalf("Watch = %v, opened %v", err, opened)
 	}
@@ -186,11 +186,11 @@ func TestOpenRefusesWhatIsNotContainerd(t *testing.T) {
 
 func TestPortsLabel(t *testing.T) {
 	for in, want := range map[string]string{
-		`[{"HostPort":53,"ContainerPort":53,"Protocol":"udp"}]`: "[{udp 53  53}]",
+		`[{"HostPort":53,"ContainerPort":53,"Protocol":"udp"}]`: "[{udp 53  53 }]",
 		`[{"HostPort":70000,"ContainerPort":80}]`:               "[]",
 		`not json`: "[]",
 		`[{"HostPort":80,"ContainerPort":80,"Protocol":"icmp"}]`: "[]",
-		`[{"HostPort":80,"ContainerPort":80,"HostIP":"::"}]`:     "[{tcp 80 :: 80}]",
+		`[{"HostPort":80,"ContainerPort":80,"HostIP":"::"}]`:     "[{tcp 80 :: 80 }]",
 		strings.Repeat(" ", maxPortsJSON+1):                      "[]",
 	} {
 		if got := fmt.Sprint(ports(in)); got != want {

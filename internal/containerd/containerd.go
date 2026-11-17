@@ -97,13 +97,15 @@ func (r *Runtime) Host(context.Context) (runtime.Host, error) {
 	return runtime.Host{Name: name}, nil
 }
 
-// Containers returns the containers of the namespace that carry label, with
-// their tasks' state.
-func (r *Runtime) Containers(ctx context.Context, label string) ([]runtime.Container, error) {
+// Containers returns the containers of the namespace that carry any of
+// labels, with their tasks' state.
+func (r *Runtime) Containers(ctx context.Context, labels ...string) ([]runtime.Container, error) {
 	ctx = r.ns(ctx)
-	list, err := containersapi.NewContainersClient(r.conn).List(ctx, &containersapi.ListContainersRequest{
-		Filters: []string{fmt.Sprintf("labels.%q", label)},
-	})
+	filters := make([]string, 0, len(labels)) // containerd ORs them
+	for _, l := range labels {
+		filters = append(filters, fmt.Sprintf("labels.%q", l))
+	}
+	list, err := containersapi.NewContainersClient(r.conn).List(ctx, &containersapi.ListContainersRequest{Filters: filters})
 	if err != nil {
 		return nil, fmt.Errorf("containerd: listing containers: %s", safe.Short(err.Error(), 200))
 	}
@@ -123,7 +125,7 @@ func (r *Runtime) Containers(ctx context.Context, label string) ([]runtime.Conta
 	}
 	var out []runtime.Container
 	for _, c := range list.Containers {
-		if _, ok := c.Labels[label]; !ok {
+		if !carriesAny(c.Labels, labels) {
 			continue
 		}
 		rc := runtime.Container{ID: c.ID, Name: c.ID, Labels: c.Labels, Running: running[c.ID]}
@@ -136,6 +138,15 @@ func (r *Runtime) Containers(ctx context.Context, label string) ([]runtime.Conta
 		out = append(out, rc)
 	}
 	return out, nil
+}
+
+func carriesAny(have map[string]string, labels []string) bool {
+	for _, l := range labels {
+		if _, ok := have[l]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // nerdctlPort is one entry of nerdctl's ports label (CNI's port mapping).
@@ -180,7 +191,7 @@ func ports(s string) []runtime.Port {
 
 // Watch streams the namespace's task and container events. Exec events -
 // commands run in a container - change nothing and are left out.
-func (r *Runtime) Watch(ctx context.Context, label string, opened func(), changed func(string)) error {
+func (r *Runtime) Watch(ctx context.Context, _ []string, opened func(), changed func(string)) error {
 	ns := fmt.Sprintf("namespace==%q", r.namespace)
 	stream, err := eventsapi.NewEventsClient(r.conn).Subscribe(ctx, &eventsapi.SubscribeRequest{
 		Filters: []string{ns + `,topic~="^/tasks/"`, ns + `,topic~="^/containers/"`},
@@ -210,7 +221,7 @@ func (r *Runtime) Watch(ctx context.Context, label string, opened func(), change
 	}
 }
 
-// Ingress: containerd has no Swarm.
-func (r *Runtime) Ingress(context.Context, string) ([]runtime.Port, error) {
+// SwarmServices: containerd has no Swarm.
+func (r *Runtime) SwarmServices(context.Context) ([]runtime.SwarmService, error) {
 	return nil, runtime.ErrUnsupported
 }

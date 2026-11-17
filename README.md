@@ -10,8 +10,11 @@ one it is talking to by itself.
 
 ## What it does
 
-For every running container labelled `consul=yes`, it registers one Consul
-service instance **per published port and address family**:
+What is labelled `consul=yes` is registered: a container (`docker run -l`),
+or a Swarm service - on the service (`docker service create --label`) or on
+its containers (`--container-label`). Every node registers the containers
+running on it, at its own address, one Consul service instance **per
+published port and address family**:
 
 ```
 docker run -d -l consul=yes -p 8080:80 nginx      # on docker1, 192.168.1.93
@@ -32,14 +35,20 @@ both an IPv4 and an IPv6 address only an IPv6 SRV target, which IPv4-only
 clients cannot use, and no IPv6 PTR answer.
 
 **Service names** - always a valid DNS label:
-- a Swarm task: its service's name (`mystack_web` becomes `mystack-web`);
-- a Compose container: `<project>-<service>`;
-- otherwise the container's name;
-- a container publishing more than one port gets one service per port:
-  `web-80`, `web-443`.
+- a Swarm task is an instance of its service, named after it
+  (`mystack_web` becomes `mystack-web`): every node registers its own tasks
+  under that one name;
+- any other container is a service of its own, named after the container
+  (Compose's too: `shop-api-1`).
 
-Each service is tagged with its protocol (`tcp`, `udp`), so
-`_dns._udp.service.dmarts.app` finds the UDP ones; `--tags` adds your own.
+Each instance is tagged with its protocol (`tcp`, `udp`), so
+`_dns._udp.service.dmarts.app` finds the UDP ones. A container publishing
+more than one port has one instance per port under its one name, each also
+tagged `port-<container port>`: `_web._port-443.service.dmarts.app`.
+`--tags` adds your own.
+
+When a container stops, the node it ran on deregisters its instances - and
+only those.
 
 **Health:** a container with a health check (`HEALTHCHECK`, `--health-cmd`)
 gets a TTL check that follows it - critical while starting or unhealthy,
@@ -117,8 +126,13 @@ anywhere with `docker -H ssh://<manager>`. Swarm cannot change a config or
 secret in place: after editing one, `docker stack rm consul` and deploy
 again.
 
-Swarm's routing-mesh ports can only be read on a manager; on workers,
-publish with `mode=host` (each task is then registered at its own node).
+Only a Swarm manager can read the Swarm's services - their labels and
+routing-mesh ports - so the registrators on managers write the services to
+register into Consul's KV store (`docker-consul-registrator/swarm/`), and
+those on workers read them from there. A routing-mesh task is registered
+at its node's IPv4 address and published port, one instance per task, its
+check passing while it runs (or following its health check); a task
+published with `mode=host` is registered like any container.
 
 **A single host:**
 
@@ -136,6 +150,7 @@ The registrator's token (`--token-file`, read again when the file changes):
 ```hcl
 service_prefix "" { policy = "write" }
 agent_prefix "" { policy = "read" }
+key_prefix "docker-consul-registrator/" { policy = "write" } # a Swarm's services, shared by its managers
 ```
 
 The bundled agents' token (`acl.tokens.agent`):

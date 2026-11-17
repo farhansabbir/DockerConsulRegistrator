@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,7 @@ type Options struct {
 // Client talks to one Consul agent.
 type Client struct {
 	hc        *http.Client
+	blocking  *http.Client // blocking queries: no timeout but their context's
 	base      string
 	tokenFile string
 
@@ -85,7 +87,7 @@ func New(o Options) (*Client, error) {
 		}
 		tr.TLSClientConfig = tc
 	}
-	c := &Client{hc: &http.Client{Transport: tr, Timeout: 15 * time.Second}, base: u.String(), tokenFile: o.TokenFile}
+	c := &Client{hc: &http.Client{Transport: tr, Timeout: 15 * time.Second}, blocking: &http.Client{Transport: tr}, base: u.String(), tokenFile: o.TokenFile}
 	if o.TokenFile != "" {
 		if _, err := c.readToken(); err != nil {
 			return nil, err
@@ -245,50 +247,117 @@ func (c *Client) UpdateTTL(ctx context.Context, checkID, status, output string) 
 	return c.do(ctx, http.MethodPut, "/v1/agent/check/update/"+url.PathEscape(checkID), body, nil)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
-	var body io.Reader
-	if in != nil {
-		b, err := json.Marshal(in)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(b)
+// KVPair is a key of Consul's KV store and its value.
+type KVPair struct {
+	Key   string
+	Value []byte
+}
+
+// KVList returns the keys under prefix, and the store's index for them.
+// With index > 0 it is a blocking query: it waits up to wait for a change
+// past index.
+func (c *Client) KVList(ctx context.Context, prefix string, index uint64, wait time.Duration) ([]KVPair, uint64, error) {
+	q := url.Values{"recurse": {"true"}}
+	hc := c.hc
+	if index > 0 {
+		q.Set("index", strconv.FormatUint(index, 10))
+		q.Set("wait", fmt.Sprintf("%ds", int(wait.Seconds())))
+		hc = c.blocking
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait+wait/16+15*time.Second) // Consul adds up to wait/16
+		defer cancel()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	resp, err := c.request(ctx, hc, http.MethodGet, "/v1/kv/"+keyPath(prefix)+"?"+q.Encode(), nil, "")
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	idx, _ := strconv.ParseUint(resp.Header.Get("X-Consul-Index"), 10, 64)
+	if resp.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return nil, idx, nil // nothing under prefix
+	}
+	if err := statusErr("/v1/kv", resp); err != nil {
+		return nil, 0, err
+	}
+	var out []KVPair
+	if err := readJSON("/v1/kv", resp, &out); err != nil {
+		return nil, 0, err
+	}
+	return out, idx, nil
+}
+
+// KVPut sets key to value.
+func (c *Client) KVPut(ctx context.Context, key string, value []byte) error {
+	resp, err := c.request(ctx, c.hc, http.MethodPut, "/v1/kv/"+keyPath(key), bytes.NewReader(value), "application/octet-stream")
 	if err != nil {
 		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return statusErr("/v1/kv", resp)
+}
+
+// KVDelete removes key.
+func (c *Client) KVDelete(ctx context.Context, key string) error {
+	resp, err := c.request(ctx, c.hc, http.MethodDelete, "/v1/kv/"+keyPath(key), nil, "")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return statusErr("/v1/kv", resp)
+}
+
+// keyPath escapes each part of a KV key for a URL path.
+func keyPath(key string) string {
+	parts := strings.Split(key, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
+}
+
+// request sends a request with the token; the caller reads and closes the
+// answer, whatever its status.
+func (c *Client) request(ctx context.Context, hc *http.Client, method, path string, body io.Reader, ctype string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return nil, err
 	}
 	tok, err := c.readToken()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if tok != "" {
 		req.Header.Set("X-Consul-Token", tok)
 	}
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if ctype != "" {
+		req.Header.Set("Content-Type", ctype)
 	}
-	resp, err := c.hc.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("consul: %w", err)
+		return nil, fmt.Errorf("consul: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	name := strings.SplitN(path, "?", 2)[0]
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		msg := safe.Short(strings.TrimSpace(string(b)), 200)
-		switch resp.StatusCode {
-		case http.StatusForbidden:
-			return fmt.Errorf("consul: %s: %w: %s", name, ErrDenied, msg)
-		case http.StatusNotFound:
-			return fmt.Errorf("consul: %s: %w: %s", name, ErrNotFound, msg)
-		}
-		return fmt.Errorf("consul: %s answered %s: %s", name, resp.Status, msg)
-	}
-	if out == nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
+	return resp, nil
+}
+
+// statusErr is the error an answer that is not 200 stands for, its message
+// cleaned: it can hold anything.
+func statusErr(name string, resp *http.Response) error {
+	if resp.StatusCode == http.StatusOK {
 		return nil
 	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	msg := safe.Short(strings.TrimSpace(string(b)), 200)
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return fmt.Errorf("consul: %s: %w: %s", name, ErrDenied, msg)
+	case http.StatusNotFound:
+		return fmt.Errorf("consul: %s: %w: %s", name, ErrNotFound, msg)
+	}
+	return fmt.Errorf("consul: %s answered %s: %s", name, resp.Status, msg)
+}
+
+func readJSON(name string, resp *http.Response, out any) error {
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return fmt.Errorf("consul: %s: %w", name, err)
@@ -300,4 +369,30 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("consul: %s: the answer is not what Consul sends: %w", name, err)
 	}
 	return nil
+}
+
+func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	ctype := ""
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body, ctype = bytes.NewReader(b), "application/json"
+	}
+	resp, err := c.request(ctx, c.hc, method, path, body, ctype)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	name := strings.SplitN(path, "?", 2)[0]
+	if err := statusErr(name, resp); err != nil {
+		return err
+	}
+	if out == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
+		return nil
+	}
+	return readJSON(name, resp, out)
 }

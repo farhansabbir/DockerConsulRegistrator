@@ -26,7 +26,8 @@ const (
 	MetaHash  = "registration-hash" // the registration without its check's status
 )
 
-// Label marks a container for registration: Label=yes.
+// Label marks what is registered - a container, or a Swarm service on the
+// service or on its containers: Label=yes.
 const Label = "consul"
 
 // Addrs are the host's addresses to register for ports published on all of
@@ -60,8 +61,8 @@ type TTL struct {
 	Output  string
 }
 
-// Note is something worth saying once about a container, such as why it is
-// not registered. Key says what it is about, so it is said once.
+// Note is something worth saying once, such as why a container is not
+// registered. Key says what it is about, so it is said once.
 type Note struct {
 	Key string
 	Msg string
@@ -70,18 +71,21 @@ type Note struct {
 
 // endpoint is one way into a container: a published port on one address.
 type endpoint struct {
-	proto   string
-	target  int
-	port    int
-	addr    netip.Addr
-	ingress string // the Swarm service, for routing-mesh ports
+	proto  string
+	target int
+	port   int
+	addr   netip.Addr
+	own    bool // addr is an address of its own, not the host's for all
+	mesh   bool // a Swarm routing-mesh port
 }
 
-// Desired is the registrations wanted for containers - each carrying
-// Label=yes - by ID: one per published port and address family, so DNS
-// answers A, AAAA, SRV and PTR for each. ingress holds the routing-mesh
-// ports of the Swarm services of the containers, by service ID.
-func Desired(containers []runtime.Container, ingress map[string][]runtime.Port, o Options) (map[string]Want, []Note) {
+// Desired is the registrations wanted for containers - each one to be
+// registered - by ID: one instance per published port and address family,
+// so DNS answers A, AAAA, SRV and PTR for each. A Swarm task is an instance
+// of its service, named after it; any other container is a service of its
+// own, named after the container. mesh holds the routing-mesh ports of the
+// containers' Swarm services, by service ID.
+func Desired(containers []runtime.Container, mesh map[string][]runtime.Port, o Options) (map[string]Want, []Note) {
 	want := map[string]Want{}
 	var notes []Note
 	note := func(c runtime.Container, why, msg string, kv ...any) {
@@ -91,15 +95,15 @@ func Desired(containers []runtime.Container, ingress map[string][]runtime.Port, 
 		if !c.Running {
 			continue
 		}
-		base := serviceName(c)
-		if base == "" {
+		name := serviceName(c)
+		if name == "" {
 			note(c, "name", "a container is not registered: no service name can be made from its name")
 			continue
 		}
 		var eps []endpoint
 		seen := map[string]bool{}
 		add := func(e endpoint) {
-			k := fmt.Sprint(e.proto, e.port, e.addr)
+			k := fmt.Sprint(e.proto, "/", e.port, "/", e.addr)
 			if !seen[k] {
 				seen[k] = true
 				eps = append(eps, e)
@@ -114,18 +118,17 @@ func Desired(containers []runtime.Container, ingress map[string][]runtime.Port, 
 			if !addr.IsValid() {
 				continue // published on all IPv6 addresses, and the host has none to register
 			}
-			add(endpoint{proto: p.Proto, target: p.Target, port: p.HostPort, addr: addr})
+			own := p.HostIP != "" && p.HostIP != "0.0.0.0" && p.HostIP != "::"
+			add(endpoint{proto: p.Proto, target: p.Target, port: p.HostPort, addr: addr, own: own})
 		}
-		if sid := c.Labels[runtime.LabelSwarmServiceID]; sid != "" {
-			// The routing mesh answers on the host's IPv4 address only.
-			for _, p := range ingress[sid] {
-				if o.Addrs.V4.IsValid() {
-					add(endpoint{proto: p.Proto, target: p.Target, port: p.HostPort, addr: o.Addrs.V4, ingress: sid})
-				}
+		// The routing mesh answers on the host's IPv4 address only.
+		for _, p := range mesh[c.Labels[runtime.LabelSwarmServiceID]] {
+			if o.Addrs.V4.IsValid() {
+				add(endpoint{proto: p.Proto, target: p.Target, port: p.HostPort, addr: o.Addrs.V4, mesh: true})
 			}
 		}
 		if len(eps) == 0 {
-			note(c, "noports", "a container labelled consul=yes publishes no port to register")
+			note(c, "noports", "a container to register publishes no port")
 			continue
 		}
 		targets := map[int]bool{}
@@ -133,47 +136,20 @@ func Desired(containers []runtime.Container, ingress map[string][]runtime.Port, 
 			targets[e.target] = true
 		}
 		for _, e := range eps {
-			name := base
-			if len(targets) > 1 {
-				name = suffixed(base, "-"+strconv.Itoa(e.target))
-			}
-			w := registration(c, e, name, o)
-			if old, ok := want[w.Reg.ID]; ok {
-				// Two tasks of one Swarm service share its mesh port: one
-				// registration, healthy while either is.
-				if old.TTL != nil && w.TTL != nil && rank(w.TTL.Status) > rank(old.TTL.Status) {
-					old.TTL = w.TTL
-				}
-				want[w.Reg.ID] = old
-				continue
-			}
+			w := registration(c, e, name, len(targets) > 1, o)
 			want[w.Reg.ID] = w
 		}
 	}
 	return want, notes
 }
 
-// serviceName is the container's service: its Swarm service, its Compose
-// project and service, or its own name - as a DNS label.
+// serviceName is the service a container is an instance of: its Swarm
+// service's name, or its own - as a DNS label.
 func serviceName(c runtime.Container) string {
-	l := c.Labels
-	if s := l[runtime.LabelSwarmService]; s != "" {
-		return safe.Label(s)
-	}
-	if s := l[runtime.LabelComposeService]; s != "" {
-		if p := l[runtime.LabelComposeProject]; p != "" {
-			return safe.Label(p + "-" + s)
-		}
+	if s := c.Labels[runtime.LabelSwarmService]; s != "" {
 		return safe.Label(s)
 	}
 	return safe.Label(c.Name)
-}
-
-func suffixed(base, suffix string) string {
-	if len(base)+len(suffix) > 63 {
-		base = strings.TrimRight(base[:63-len(suffix)], "-")
-	}
-	return base + suffix
 }
 
 // hostAddr is the address to register for a port published on hostIP: the
@@ -203,32 +179,36 @@ func hostAddr(hostIP string, a Addrs) (addr netip.Addr, why string) {
 	return ip, ""
 }
 
-func registration(c runtime.Container, e endpoint, name string, o Options) Want {
-	fam := "ipv4"
-	if e.addr.Is6() {
-		fam = "ipv6"
+func registration(c runtime.Container, e endpoint, name string, manyPorts bool, o Options) Want {
+	where := "ipv4"
+	switch {
+	case e.own:
+		// One port may be published on several addresses of a family.
+		b := e.addr.AsSlice()
+		where = hex.EncodeToString(b)
+	case e.addr.Is6():
+		where = "ipv6"
 	}
-	var id string
+	id := fmt.Sprintf("dcr-%s-%d-%s-%s", short(c.ID), e.port, e.proto, where)
 	meta := map[string]string{
 		MetaOwner:        Owner,
 		"docker-node":    safe.Meta(o.Node),
+		"container-id":   safe.Meta(c.ID),
+		"container-name": safe.Meta(c.Name),
 		"container-port": fmt.Sprintf("%d/%s", e.target, e.proto),
 	}
-	if e.ingress != "" {
-		id = fmt.Sprintf("dcr-swarm-%s-%d-%s-%s", e.ingress, e.port, e.proto, fam)
-		meta["swarm-service"] = safe.Meta(c.Labels[runtime.LabelSwarmService])
+	if s := c.Labels[runtime.LabelSwarmService]; s != "" {
+		meta["swarm-service"] = safe.Meta(s)
+	}
+	if e.mesh {
 		meta["published"] = "ingress"
-	} else {
-		id = fmt.Sprintf("dcr-%s-%d-%s-%s", short(c.ID), e.port, e.proto, fam)
-		meta["container-id"] = safe.Meta(c.ID)
-		meta["container-name"] = safe.Meta(c.Name)
-		if s := c.Labels[runtime.LabelSwarmService]; s != "" {
-			meta["swarm-service"] = safe.Meta(s)
-		}
 	}
 	tags := append([]string{}, o.Tags...)
 	if !contains(tags, e.proto) {
 		tags = append(tags, e.proto) // what `_name._udp` SRV queries match
+	}
+	if manyPorts {
+		tags = append(tags, "port-"+strconv.Itoa(e.target)) // tells the ports apart: `_name._port-443`
 	}
 	reg := consul.Registration{
 		ID:      id,
@@ -244,18 +224,25 @@ func registration(c runtime.Container, e endpoint, name string, o Options) Want 
 	if o.DeregisterAfter > 0 {
 		deregister = o.DeregisterAfter.String()
 	}
-	switch {
-	case o.Check == config.CheckNone:
-	case o.Check == config.CheckTTL || (o.Check == config.CheckAuto && c.Health != nil):
+	ttl := func(name string) {
 		status, output := health(c)
 		reg.Check = &consul.Check{
-			Name:                           "Container health",
+			Name:                           name,
 			Notes:                          "kept up to date by " + Owner + " from the container runtime",
 			TTL:                            (3 * o.Interval).String(),
 			Status:                         status,
 			DeregisterCriticalServiceAfter: deregister,
 		}
 		w.TTL = &TTL{CheckID: consul.CheckID(id), Status: status, Output: output}
+	}
+	switch {
+	case o.Check == config.CheckNone:
+	case o.Check == config.CheckTTL || (o.Check == config.CheckAuto && c.Health != nil):
+		ttl("Container health")
+	case o.Check == config.CheckAuto && e.mesh:
+		// A TCP check through the mesh reaches whichever task the mesh
+		// picks, not this one: the container's state is this instance's.
+		ttl("Container running")
 	case e.proto == "tcp":
 		timeout := 2 * time.Second
 		if o.Interval < timeout {
@@ -292,16 +279,6 @@ func health(c runtime.Container) (status, output string) {
 	return "critical", strings.TrimSpace(output) // unhealthy, or not healthy yet
 }
 
-func rank(status string) int {
-	switch status {
-	case "passing":
-		return 2
-	case "warning":
-		return 1
-	}
-	return 0
-}
-
 // hash is the registration without its check's status, which changes
 // through TTL updates, not by registering again.
 func hash(r consul.Registration) string {
@@ -334,8 +311,8 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// sortedIDs returns the keys of want in order, so logs read the same way
-// every time.
+// sortedIDs returns the keys of m in order, so logs read the same way every
+// time.
 func sortedIDs[V any](m map[string]V) []string {
 	ids := make([]string, 0, len(m))
 	for id := range m {

@@ -130,3 +130,54 @@ func TestErrors(t *testing.T) {
 		t.Fatalf("404: %v", err)
 	}
 }
+
+func TestKV(t *testing.T) {
+	var seen []string
+	var put string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/kv/empty"):
+			w.Header().Set("X-Consul-Index", "7")
+			http.Error(w, "", http.StatusNotFound)
+		case r.Method == http.MethodGet:
+			w.Header().Set("X-Consul-Index", "42")
+			_, _ = fmt.Fprint(w, `[{"Key":"dcr/swarm/c1/s1","Value":"eyJuYW1lIjoid2ViIn0="}]`)
+		case r.Method == http.MethodPut:
+			b, _ := io.ReadAll(r.Body)
+			put = string(b)
+			_, _ = fmt.Fprint(w, "true")
+		default:
+			_, _ = fmt.Fprint(w, "true")
+		}
+	}))
+	defer srv.Close()
+	c, _ := New(Options{Addr: srv.URL})
+	ctx := context.Background()
+	kvs, idx, err := c.KVList(ctx, "dcr/swarm/", 0, 0)
+	if err != nil || idx != 42 || len(kvs) != 1 || kvs[0].Key != "dcr/swarm/c1/s1" || string(kvs[0].Value) != `{"name":"web"}` {
+		t.Fatalf("KVList = %+v %d %v", kvs, idx, err)
+	}
+	if kvs, idx, err := c.KVList(ctx, "empty/", 0, 0); err != nil || idx != 7 || len(kvs) != 0 {
+		t.Fatalf("an empty prefix: %+v %d %v", kvs, idx, err)
+	}
+	if _, _, err := c.KVList(ctx, "dcr/swarm/", 42, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.KVPut(ctx, "dcr/swarm/c1/s 2", []byte("v")); err != nil || put != "v" {
+		t.Fatalf("KVPut: %v %q", err, put)
+	}
+	if err := c.KVDelete(ctx, "dcr/swarm/c1/s1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"GET /v1/kv/dcr/swarm/?recurse=true",
+		"GET /v1/kv/empty/?recurse=true",
+		"GET /v1/kv/dcr/swarm/?index=42&recurse=true&wait=60s",
+		"PUT /v1/kv/dcr/swarm/c1/s%202",
+		"DELETE /v1/kv/dcr/swarm/c1/s1",
+	}
+	if strings.Join(seen, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("requests:\n%s\nwant:\n%s", strings.Join(seen, "\n"), strings.Join(want, "\n"))
+	}
+}

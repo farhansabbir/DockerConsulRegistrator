@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/farhansabbir/DockerConsulRegistrator/internal/config"
@@ -33,6 +34,9 @@ type Consul interface {
 	Register(ctx context.Context, r consul.Registration) error
 	Deregister(ctx context.Context, id string) error
 	UpdateTTL(ctx context.Context, checkID, status, output string) error
+	KVList(ctx context.Context, prefix string, index uint64, wait time.Duration) ([]consul.KVPair, uint64, error)
+	KVPut(ctx context.Context, key string, value []byte) error
+	KVDelete(ctx context.Context, key string) error
 }
 
 // Registrator keeps one agent in line with one runtime.
@@ -47,7 +51,8 @@ type Registrator struct {
 	// Domain is the DNS domain the agent serves, for the names in the log.
 	Domain string
 
-	trigger chan struct{}
+	trigger     chan struct{}
+	swarmWorker atomic.Bool // this node is a Swarm worker: follow the KV store
 
 	// Owned by Run's goroutine.
 	ttls    map[string]TTL
@@ -83,6 +88,7 @@ func (r *Registrator) Trigger() {
 // Run keeps Consul in line until ctx is done.
 func (r *Registrator) Run(ctx context.Context) error {
 	go r.watch(ctx)
+	go r.watchSwarmServices(ctx)
 	resync := time.NewTicker(r.cfg.Resync)
 	defer resync.Stop()
 	refresh := time.NewTicker(r.cfg.CheckInterval)
@@ -125,7 +131,7 @@ func (r *Registrator) Run(ctx context.Context) error {
 func (r *Registrator) watch(ctx context.Context) {
 	backoff := time.Second
 	for {
-		err := r.rt.Watch(ctx, Label, func() {
+		err := r.rt.Watch(ctx, []string{Label, runtime.LabelSwarmServiceID}, func() {
 			backoff = time.Second
 			r.log.OK("following the runtime's container events", "runtime", r.rt.Kind())
 			r.Trigger()
@@ -177,22 +183,34 @@ func (r *Registrator) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	list, err := r.rt.Containers(ctx, Label)
+	r.swarmWorker.Store(host.SwarmAddr != "" && !host.SwarmManager)
+	seen := map[string]bool{}
+	svcs, err := r.swarmServices(ctx, host, seen)
 	if err != nil {
 		return err
 	}
-	seen := map[string]bool{}
+	list, err := r.rt.Containers(ctx, Label, runtime.LabelSwarmServiceID)
+	if err != nil {
+		return err
+	}
 	var labelled []runtime.Container
 	for _, c := range list {
-		if v := c.Labels[Label]; v != "yes" {
+		sid := c.Labels[runtime.LabelSwarmServiceID]
+		_, serviceLabelled := svcs[sid]
+		v, has := c.Labels[Label]
+		switch {
+		case v == "yes" || (sid != "" && serviceLabelled):
+			labelled = append(labelled, c)
+			if sid != "" && !serviceLabelled && len(c.Ports) == 0 && host.SwarmAddr != "" && !host.SwarmManager {
+				r.noteOnce(seen, Note{Key: "mesh/" + sid, Msg: "a Swarm task's routing-mesh ports are not known here: the registrator on a manager writes them to Consul - is one running?",
+					KV: []any{"swarm_service", safe.Short(c.Labels[runtime.LabelSwarmService], 80)}})
+			}
+		case has:
 			r.noteOnce(seen, Note{Key: c.ID + "/label", Msg: "a container is not registered: its consul label is not yes",
 				KV: []any{"container", safe.Short(c.Name, 80), "consul", safe.Short(v, 40)}})
-			continue
 		}
-		labelled = append(labelled, c)
 	}
-	ingress := r.ingress(ctx, labelled, seen)
-	want, notes := Desired(labelled, ingress, Options{
+	want, notes := Desired(labelled, meshPorts(svcs), Options{
 		Addrs: addrs, Node: host.Name, Tags: r.cfg.Tags, Check: r.cfg.Check,
 		Interval: r.cfg.CheckInterval, DeregisterAfter: r.cfg.DeregisterAfter,
 	})
@@ -292,30 +310,6 @@ func (r *Registrator) pushTTLs(ctx context.Context, all bool) {
 		}
 		r.pushed[id] = key
 	}
-}
-
-// ingress asks for the routing-mesh ports of the containers' Swarm
-// services.
-func (r *Registrator) ingress(ctx context.Context, cs []runtime.Container, seen map[string]bool) map[string][]runtime.Port {
-	out := map[string][]runtime.Port{}
-	asked := map[string]bool{}
-	for _, c := range cs {
-		sid := c.Labels[runtime.LabelSwarmServiceID]
-		if sid == "" || asked[sid] {
-			continue
-		}
-		asked[sid] = true
-		ports, err := r.rt.Ingress(ctx, sid)
-		if err != nil {
-			if len(c.Ports) == 0 {
-				r.noteOnce(seen, Note{Key: "ingress/" + sid, Msg: "the routing-mesh ports of a Swarm service cannot be read here; publish them with mode=host to register them",
-					KV: []any{"swarm_service", safe.Short(c.Labels[runtime.LabelSwarmService], 80), "err", err}})
-			}
-			continue
-		}
-		out[sid] = ports
-	}
-	return out
 }
 
 func (r *Registrator) noteOnce(seen map[string]bool, n Note) {

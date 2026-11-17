@@ -139,7 +139,7 @@ func TestErrorsAreCleaned(t *testing.T) {
 
 func TestEventsStream(t *testing.T) {
 	c := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("filters") != `{"label":["consul"],"type":["container"]}` {
+		if r.URL.Query().Get("filters") != `{"type":["container","service"]}` {
 			http.Error(w, "filters "+r.URL.RawQuery, 400)
 			return
 		}
@@ -151,7 +151,7 @@ func TestEventsStream(t *testing.T) {
 	}))
 	var opened bool
 	var got []string
-	err := c.Events(context.Background(), "consul", func() { opened = true }, func(e Event) { got = append(got, e.Action) })
+	err := c.Events(context.Background(), []string{"container", "service"}, func() { opened = true }, func(e Event) { got = append(got, e.Action) })
 	if err == nil || !strings.Contains(err.Error(), "ended") {
 		t.Fatalf("a stream that ends: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestEventsEndQuietlyWithTheContext(t *testing.T) {
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(100 * time.Millisecond); cancel() }()
-	if err := c.Events(ctx, "consul", func() {}, func(Event) {}); err != nil {
+	if err := c.Events(ctx, []string{"container"}, func() {}, func(Event) {}); err != nil {
 		t.Fatalf("Events after cancel = %v, want nil", err)
 	}
 }
@@ -176,7 +176,7 @@ func TestEventsRefuseAHugeLine(t *testing.T) {
 	c := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, `{"Action":"`+strings.Repeat("a", maxEvent+10)+`"}`+"\n")
 	}))
-	err := c.Events(context.Background(), "consul", func() {}, func(Event) { t.Error("a huge event was delivered") })
+	err := c.Events(context.Background(), []string{"container"}, func() {}, func(Event) { t.Error("a huge event was delivered") })
 	if err == nil {
 		t.Fatal("no error")
 	}

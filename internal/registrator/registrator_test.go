@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/farhansabbir/DockerConsulRegistrator/internal/config"
 	"github.com/farhansabbir/DockerConsulRegistrator/internal/consul"
@@ -15,30 +16,50 @@ import (
 )
 
 type fakeRuntime struct {
+	host       runtime.Host
 	containers []runtime.Container
+	services   []runtime.SwarmService
 }
 
 func (f *fakeRuntime) Kind() string    { return runtime.Docker }
 func (f *fakeRuntime) Version() string { return "test" }
 func (f *fakeRuntime) Host(context.Context) (runtime.Host, error) {
-	return runtime.Host{Name: "docker1"}, nil
+	h := f.host
+	if h.Name == "" {
+		h.Name = "docker1"
+	}
+	return h, nil
 }
-func (f *fakeRuntime) Containers(context.Context, string) ([]runtime.Container, error) {
-	return f.containers, nil
+func (f *fakeRuntime) Containers(_ context.Context, labels ...string) ([]runtime.Container, error) {
+	var out []runtime.Container
+	for _, c := range f.containers {
+		for _, l := range labels {
+			if _, ok := c.Labels[l]; ok {
+				out = append(out, c)
+				break
+			}
+		}
+	}
+	return out, nil
 }
-func (f *fakeRuntime) Watch(ctx context.Context, _ string, opened func(), _ func(string)) error {
+func (f *fakeRuntime) Watch(ctx context.Context, _ []string, opened func(), _ func(string)) error {
 	opened()
 	<-ctx.Done()
 	return nil
 }
-func (f *fakeRuntime) Ingress(context.Context, string) ([]runtime.Port, error) {
-	return nil, runtime.ErrUnsupported
+func (f *fakeRuntime) SwarmServices(context.Context) ([]runtime.SwarmService, error) {
+	if !f.host.SwarmManager {
+		return nil, runtime.ErrUnsupported
+	}
+	return f.services, nil
 }
 
 type fakeConsul struct {
 	mu       sync.Mutex
 	services map[string]consul.Service
 	calls    []string
+	kv       map[string]string
+	kvCalls  []string
 }
 
 func (f *fakeConsul) Self(context.Context) (consul.Self, error) {
@@ -75,6 +96,38 @@ func (f *fakeConsul) UpdateTTL(_ context.Context, id, status, _ string) error {
 	f.calls = append(f.calls, "ttl "+id+" "+status)
 	return nil
 }
+func (f *fakeConsul) KVList(_ context.Context, prefix string, _ uint64, _ time.Duration) ([]consul.KVPair, uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []consul.KVPair
+	for _, k := range sortedIDs(f.kv) {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, consul.KVPair{Key: k, Value: []byte(f.kv[k])})
+		}
+	}
+	return out, 1, nil
+}
+func (f *fakeConsul) KVPut(_ context.Context, key string, value []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.kvCalls = append(f.kvCalls, "put "+key)
+	f.kv[key] = string(value)
+	return nil
+}
+func (f *fakeConsul) KVDelete(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.kvCalls = append(f.kvCalls, "delete "+key)
+	delete(f.kv, key)
+	return nil
+}
+func (f *fakeConsul) takeKV() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := strings.Join(f.kvCalls, "\n")
+	f.kvCalls = nil
+	return s
+}
 func (f *fakeConsul) take() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -87,7 +140,7 @@ func setup(cs ...runtime.Container) (*Registrator, *fakeRuntime, *fakeConsul, *b
 	rt := &fakeRuntime{containers: cs}
 	c := &fakeConsul{services: map[string]consul.Service{
 		"someone-elses": {ID: "someone-elses", Service: "db", Meta: map[string]string{"team": "x"}},
-	}}
+	}, kv: map[string]string{}}
 	var log bytes.Buffer
 	r := New(config.Default(), rt, c, logx.New(&log, "registrator"))
 	r.IPv6Beside = func(v4 netip.Addr) netip.Addr {
@@ -201,5 +254,74 @@ func TestAddresses(t *testing.T) {
 	self.Member.Addr = "not-an-address"
 	if _, err := r.addrs(self); err == nil {
 		t.Fatal("an agent address that is not one: no error")
+	}
+}
+
+func swarmTask(id, service, serviceID string) runtime.Container {
+	return runtime.Container{ID: id, Name: service + ".1." + id[:6], Running: true,
+		Labels: map[string]string{runtime.LabelSwarmService: service, runtime.LabelSwarmServiceID: serviceID}}
+}
+
+// TestServiceLabelOnAWorker: a worker cannot read Swarm services; it
+// registers its tasks of the services the managers wrote to the KV store.
+func TestServiceLabelOnAWorker(t *testing.T) {
+	r, rt, c, log := setup(
+		swarmTask(strings.Repeat("a", 64), "web-svc", "svc123"),
+		swarmTask(strings.Repeat("b", 64), "other", "svc999"), // not labelled
+	)
+	rt.host = runtime.Host{Name: "docker2", SwarmAddr: "192.168.1.94"}
+	c.kv[KVPrefix+"cluster1/svc123"] = `{"name":"web-svc","ports":[{"proto":"tcp","target":80,"published":8181}]}`
+	c.kv[KVPrefix+"cluster1/svcbad"] = `{"name":"x","ports":[{"proto":"icmp","target":0,"published":1}]}`
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.take(); got != "register dcr-aaaaaaaaaaaa-8181-tcp-ipv4\nttl service:dcr-aaaaaaaaaaaa-8181-tcp-ipv4 passing" {
+		t.Fatalf("calls:\n%s", got)
+	}
+	if !r.swarmWorker.Load() {
+		t.Fatal("not marked a Swarm worker: it would not follow the KV store")
+	}
+	if !strings.Contains(log.String(), "a Swarm service in the KV store is not one") || strings.Contains(log.String(), "other") {
+		t.Fatalf("log: %s", log.String())
+	}
+	if got := c.takeKV(); got != "" {
+		t.Fatalf("a worker wrote the KV store:\n%s", got)
+	}
+}
+
+// TestAManagerWritesTheSwarmServices: what is labelled, on the service or
+// its containers, with its routing-mesh ports; nothing else.
+func TestAManagerWritesTheSwarmServices(t *testing.T) {
+	r, rt, c, _ := setup(swarmTask(strings.Repeat("a", 64), "web-svc", "svcA"))
+	rt.host = runtime.Host{Name: "docker1", SwarmAddr: "192.168.1.93", SwarmManager: true, SwarmCluster: "cluster1"}
+	rt.services = []runtime.SwarmService{
+		{ID: "svcA", Name: "web-svc", Labels: map[string]string{Label: "yes"},
+			Ports: []runtime.Port{{Proto: "tcp", Target: 80, HostPort: 8181, Mode: "ingress"}, {Proto: "tcp", Target: 81, HostPort: 8282, Mode: "host"}}},
+		{ID: "svcB", Name: "by-container", ContainerLabels: map[string]string{Label: "yes"}},
+		{ID: "svcC", Name: "not-labelled"},
+	}
+	c.kv[KVPrefix+"cluster1/gone"] = `{"name":"gone"}`
+	c.kv[KVPrefix+"other-swarm/svcZ"] = `{"name":"theirs"}`
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := "put " + KVPrefix + "cluster1/svcA\nput " + KVPrefix + "cluster1/svcB\ndelete " + KVPrefix + "cluster1/gone"
+	if got := c.takeKV(); got != want {
+		t.Fatalf("KV writes:\n%s\nwant:\n%s", got, want)
+	}
+	if got := c.kv[KVPrefix+"cluster1/svcA"]; got != `{"name":"web-svc","ports":[{"proto":"tcp","target":80,"published":8181}]}` {
+		t.Fatalf("svcA = %s", got)
+	}
+	if _, ok := c.kv[KVPrefix+"other-swarm/svcZ"]; !ok {
+		t.Fatal("another Swarm's entry was removed")
+	}
+	if got := c.take(); got != "register dcr-aaaaaaaaaaaa-8181-tcp-ipv4\nttl service:dcr-aaaaaaaaaaaa-8181-tcp-ipv4 passing" {
+		t.Fatalf("the manager's own task:\n%s", got)
+	}
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.takeKV(); got != "" {
+		t.Fatalf("nothing changed, yet:\n%s", got)
 	}
 }
