@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>docker-consul-registrator</title>
+<meta name="description" content="Label a container consul=yes and Consul's DNS answers for it: A, AAAA, SRV and PTR. Docker, Podman and containerd.">
+<style>
+:root {
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --text: #1d2125;
+  --muted: #5b636b;
+  --line: #e3e5e8;
+  --accent: #0f766e;
+  --accent-soft: #e6f4f2;
+  --code-bg: #f3f4f5;
+  --code-text: #1d2125;
+  --warn-bg: #fdf6e3;
+  --warn-line: #e9d7a5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111416;
+    --surface: #171b1e;
+    --text: #e6e8ea;
+    --muted: #9aa3ab;
+    --line: #2a3035;
+    --accent: #4fd1c0;
+    --accent-soft: #15302d;
+    --code-bg: #1d2226;
+    --code-text: #e6e8ea;
+    --warn-bg: #2a2416;
+    --warn-line: #4d4126;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 4.5rem; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+a { color: var(--accent); }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.875em; }
+code { background: var(--code-bg); color: var(--code-text); padding: 0.1em 0.35em; border-radius: 4px; }
+pre {
+  background: var(--code-bg);
+  color: var(--code-text);
+  padding: 0.9rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  overflow-x: auto;
+  line-height: 1.5;
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+.wrap { max-width: 860px; margin: 0 auto; padding: 0 16px; }
+
+header.top {
+  position: sticky; top: 0; z-index: 10;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--line);
+}
+header.top .wrap { display: flex; align-items: center; gap: 1.25rem; height: 3.5rem; }
+.brand { font-weight: 650; color: var(--text); text-decoration: none; white-space: nowrap; }
+nav { display: flex; gap: 1rem; overflow-x: auto; scrollbar-width: none; }
+nav::-webkit-scrollbar { display: none; }
+nav a { color: var(--muted); text-decoration: none; font-size: 0.925rem; white-space: nowrap; }
+nav a:hover { color: var(--accent); }
+
+.hero { padding: 3.5rem 0 1.5rem; }
+.hero h1 { font-size: clamp(1.9rem, 4.5vw, 2.6rem); line-height: 1.15; margin: 0 0 0.75rem; letter-spacing: -0.01em; }
+.hero p.lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 1.5rem; max-width: 40em; }
+.pills { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.75rem; }
+.pill { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 0.15rem 0.7rem; font-size: 0.85rem; font-weight: 550; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.pair figure { margin: 0; }
+.pair figcaption { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.pair pre { margin: 0; height: calc(100% - 1.6rem); }
+
+section { padding: 2rem 0 0.5rem; border-top: 1px solid var(--line); margin-top: 2rem; }
+section h2 { font-size: 1.45rem; margin: 0 0 0.75rem; }
+section h3 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
+p { margin: 0 0 1rem; }
+ul { padding-left: 1.25rem; margin: 0 0 1rem; }
+li { margin-bottom: 0.35rem; }
+
+.flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.5rem; margin: 1.25rem 0 1.5rem; }
+.flow .box {
+  flex: 1 1 150px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+}
+.flow .box b { display: block; font-size: 0.95rem; }
+.flow .box span { font-size: 0.85rem; color: var(--muted); }
+.flow .box.hl { border-color: var(--accent); }
+.flow .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+
+.table { overflow-x: auto; margin: 0 0 1rem; border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.925rem; background: var(--surface); }
+th, td { text-align: left; padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; background: var(--code-bg); }
+tr:last-child td { border-bottom: none; }
+td code { white-space: nowrap; }
+
+.note { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 0.75rem 1rem; margin: 0 0 1rem; font-size: 0.95rem; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.grid3 pre { margin: 0; }
+.grid3 h4 { margin: 0 0 0.4rem; font-size: 0.9rem; }
+
+footer { border-top: 1px solid var(--line); margin-top: 3rem; padding: 1.5rem 0 2.5rem; color: var(--muted); font-size: 0.875rem; }
+
+@media (max-width: 720px) {
+  .pair, .grid3 { grid-template-columns: 1fr; }
+  .flow .arrow { transform: rotate(90deg); flex-basis: 100%; text-align: center; }
+  header.top .wrap { gap: 0.9rem; }
+  td code { white-space: normal; overflow-wrap: anywhere; }
+  th, td { padding: 0.5rem 0.6rem; }
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#">docker-consul-registrator</a>
+    <nav aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#dns">DNS</a>
+      <a href="#run">Run it</a>
+      <a href="#runtimes">Runtimes</a>
+      <a href="#agent">Bundled agent</a>
+      <a href="#acl">ACLs</a>
+      <a href="#options">Options</a>
+      <a href="#security">Security</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+<div class="hero">
+  <h1>Label a container. Get DNS.</h1>
+  <p class="lead">Label a container <code>consul=yes</code> and publish a port: the registrator registers it in Consul, so Consul's DNS answers for it - A, AAAA, SRV and PTR - and removes it when the container stops.</p>
+  <div class="pills">
+    <span class="pill">Docker</span><span class="pill">Podman</span><span class="pill">containerd</span>
+    <span class="pill">IPv4 + IPv6</span><span class="pill">Swarm</span><span class="pill">Consul agent built in</span>
+  </div>
+  <div class="pair">
+    <figure>
+      <figcaption>On docker1 (192.168.1.93)</figcaption>
+<pre><code>docker run -d -l consul=yes \
+  -p 8080:80 --name web nginx</code></pre>
+    </figure>
+    <figure>
+      <figcaption>Anywhere that asks Consul</figcaption>
+<pre><code>$ dig +short web.service.dmarts.app
+192.168.1.93
+$ dig +short web.service.dmarts.app SRV
+1 1 8080 c0a8015d.addr.dc1.dmarts.app.</code></pre>
+    </figure>
+  </div>
+</div>
+
+<section id="how">
+  <h2>How it works</h2>
+  <div class="flow" role="img" aria-label="Containers labelled consul=yes are read by the registrator, which registers them with the Consul agent in its own container; the agent keeps the Consul servers in step, and DNS clients get answers.">
+    <div class="box"><b>Containers</b><span>labelled <code>consul=yes</code>, ports published</span></div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="box hl"><b>Registrator</b><span>follows the runtime's events, compares, registers</span></div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="box hl"><b>Consul agent</b><span>in the same container, on the host's network</span></div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="box"><b>Consul servers</b><span>kept in step by the agent</span></div>
+  </div>
+  <ul>
+    <li>For every running container labelled <code>consul=yes</code>: one Consul service instance <strong>per published port and address family</strong>.</li>
+    <li>It compares on every change the runtime reports, and every minute in case one was missed; when the runtime restarts, it follows it again.</li>
+    <li>It only touches the services it registered (<code>registered-by = docker-consul-registrator</code> in their metadata). Only <code>consul=yes</code> counts - <code>consul=true</code> is reported, not registered.</li>
+    <li><strong>Health:</strong> a container's own health check becomes a TTL check (critical while starting or unhealthy, passing when healthy). Other TCP ports get a TCP check.</li>
+  </ul>
+</section>
+
+<section id="dns">
+  <h2>What DNS answers</h2>
+  <p>For a container named <code>web</code> publishing port 8080 on docker1, in the domain <code>dmarts.app</code>:</p>
+  <div class="table">
+  <table>
+    <thead><tr><th>Query</th><th>Answer</th></tr></thead>
+    <tbody>
+      <tr><td><code>web.service.dmarts.app A</code></td><td>the host's IPv4 address</td></tr>
+      <tr><td><code>web.service.dmarts.app AAAA</code></td><td>the host's IPv6 address, when the port is published on IPv6 too</td></tr>
+      <tr><td><code>web.service.dmarts.app SRV</code><br><code>_web._tcp.service.dmarts.app SRV</code></td><td>port 8080, one target per address family</td></tr>
+      <tr><td><code>_dns._udp.service.dmarts.app SRV</code></td><td>the UDP ports of <code>dns</code> - each service is tagged with its protocol</td></tr>
+      <tr><td>PTR of the host's IPv4 address</td><td>the host's node name, <code>docker1.node.dmarts.app</code></td></tr>
+      <tr><td>PTR of the host's IPv6 address</td><td>a service on it - Consul names nodes for their main address only</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>Service names</h3>
+  <ul>
+    <li>a Swarm task: its service's name (<code>shop_web</code> becomes <code>shop-web</code>);</li>
+    <li>a Compose container: <code>&lt;project&gt;-&lt;service&gt;</code>;</li>
+    <li>otherwise the container's name;</li>
+    <li>more than one port: one service per port - <code>web-80</code>, <code>web-443</code>.</li>
+  </ul>
+  <p>Names are always DNS labels. Consul's names always hold <code>.service.</code>: a service is <code>web.service.dmarts.app</code>, not <code>web.dmarts.app</code>.</p>
+</section>
+
+<section id="run">
+  <h2>Run it</h2>
+  <p>It needs the host's network and the runtime's socket. With <code>--agent</code> - the image's default - it starts its own Consul agent; give the agent its configuration (servers to join, gossip key, tokens) in <code>/consul/config</code>, and its state a volume.</p>
+  <h3>A single host</h3>
+<pre><code>docker run -d --name consul-registrator --network host --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v consul-agent-data:/consul/data \
+  -v /etc/consul-agent:/consul/config:ro \
+  docker-consul-registrator:VERSION \
+  --agent --token-file /consul/config/registrator.token --domain dmarts.app</code></pre>
+  <h3>A Swarm, one task per node</h3>
+<pre><code>docker service create --name consul-registrator --mode global --network host \
+  --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+  --mount type=volume,src=consul-agent-data,dst=/consul/data \
+  --config src=consul-agent,target=/consul/config/agent.hcl \
+  --secret src=consul-agent-secrets,target=/consul/config/secrets.hcl \
+  --secret src=consul-registrator-token,target=registrator.token \
+  docker-consul-registrator:VERSION \
+  --agent --token-file /run/secrets/registrator.token --domain dmarts.app</code></pre>
+  <p class="note">Swarm's routing-mesh ports can only be read on a manager. On workers, publish with <code>mode=host</code>: each task is then registered at its own node.</p>
+  <h3>The agent's configuration</h3>
+<pre><code># /consul/config/agent.hcl
+datacenter  = "dc1"
+retry_join  = ["consul-server-1", "consul-server-2", "consul-server-3"]
+client_addr = "127.0.0.1"
+dns_config { only_passing = true }
+acl {
+  enabled        = true
+  default_policy = "deny"
+}
+
+# /consul/config/secrets.hcl - keep it secret
+encrypt = "&lt;gossip key&gt;"
+acl {
+  tokens {
+    agent   = "&lt;agent token&gt;"
+    default = "&lt;DNS read token&gt;"
+  }
+}</code></pre>
+</section>
+
+<section id="runtimes">
+  <h2>Runtimes</h2>
+  <p>Mount the runtime's socket at its usual path and it is found. The socket is known by how it answers, not where it is: the Engine API's <code>/_ping</code> for Docker and Podman, containerd's gRPC version call for containerd.</p>
+  <div class="table">
+  <table>
+    <thead><tr><th>Runtime</th><th>Mount</th></tr></thead>
+    <tbody>
+      <tr><td>Docker</td><td><code>-v /var/run/docker.sock:/var/run/docker.sock</code></td></tr>
+      <tr><td>Podman, rootful</td><td><code>-v /run/podman/podman.sock:/run/podman/podman.sock</code></td></tr>
+      <tr><td>Podman, rootless</td><td><code>-v $XDG_RUNTIME_DIR/podman/podman.sock:/run/podman/podman.sock</code></td></tr>
+      <tr><td>containerd</td><td><code>-v /run/containerd/containerd.sock:/run/containerd/containerd.sock --uts host</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>containerd</strong> knows nothing of published ports: they are read from the label nerdctl writes, so containers made with nerdctl are registered. It reads one namespace, <code>default</code> unless <code>--containerd-namespace</code> says otherwise.</p>
+</section>
+
+<section id="agent">
+  <h2>The bundled Consul agent</h2>
+  <p>The registrator registers with the agent in its own container only; the agent's anti-entropy keeps the servers in step. It starts the agent with what it works out from the host:</p>
+  <ul>
+    <li><strong>node name</strong> - the host's name;</li>
+    <li><strong>address</strong> - the host's Swarm address, else the default route's;</li>
+    <li><strong>IPv6</strong> - the stable global address beside it, for AAAA answers;</li>
+    <li><strong>DNS domain</strong> - <code>--domain</code>, made the agent's own domain (so PTR answers name things in it), with <code>consul</code> kept as its alternative.</li>
+  </ul>
+  <p>Without <code>--agent</code> it registers with the agent <code>--consul</code> names, and with <code>--domain</code> it checks that agent serves the domain - and says what to add to its configuration when it does not.</p>
+</section>
+
+<section id="acl">
+  <h2>Consul ACLs</h2>
+  <div class="grid3">
+    <div>
+      <h4>The registrator</h4>
+<pre><code>service_prefix "" {
+  policy = "write"
+}
+agent_prefix "" {
+  policy = "read"
+}</code></pre>
+    </div>
+    <div>
+      <h4>The bundled agents</h4>
+<pre><code>node_prefix "" {
+  policy = "write"
+}
+service_prefix "" {
+  policy = "read"
+}</code></pre>
+    </div>
+    <div>
+      <h4>DNS (the agents' default)</h4>
+<pre><code>node_prefix "" {
+  policy = "read"
+}
+service_prefix "" {
+  policy = "read"
+}
+query_prefix "" {
+  policy = "read"
+}</code></pre>
+    </div>
+  </div>
+  <p style="margin-top:1rem">The registrator reads its token from <code>--token-file</code> only, and again whenever the file changes.</p>
+</section>
+
+<section id="options">
+  <h2>Options</h2>
+  <div class="table">
+  <table>
+    <thead><tr><th>Option</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>-s, --socket</code></td><td>the runtime's socket: a path, <code>unix:///path</code> or <code>tcp://host:port</code> (default: auto)</td></tr>
+      <tr><td><code>--runtime</code></td><td><code>auto</code>, <code>docker</code>, <code>podman</code> or <code>containerd</code></td></tr>
+      <tr><td><code>-c, --consul</code></td><td>the agent's HTTP API (default <code>127.0.0.1:8500</code>); <code>https://</code> with <code>--ca-file</code>, <code>--cert-file</code>, <code>--key-file</code></td></tr>
+      <tr><td><code>--token-file</code></td><td>the ACL token to register with</td></tr>
+      <tr><td><code>--domain</code></td><td>the DNS domain to serve the services in</td></tr>
+      <tr><td><code>-t, --tags</code></td><td>Consul tags for every service; the protocol is always added</td></tr>
+      <tr><td><code>--address</code></td><td>the host address to register, one IPv4 and one IPv6 (default: the agent's, and the IPv6 address beside it)</td></tr>
+      <tr><td><code>--check</code></td><td><code>auto</code>, <code>tcp</code>, <code>ttl</code> or <code>none</code></td></tr>
+      <tr><td><code>-i, --ignore</code></td><td>dry run: log what would change, change nothing</td></tr>
+      <tr><td><code>--agent</code></td><td>start the bundled Consul agent and register with it</td></tr>
+      <tr><td><code>--debug</code></td><td>log every event and decision</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><code>docker-consul-registrator --help</code> lists the rest.</p>
+</section>
+
+<section id="security">
+  <h2>Security</h2>
+  <ul>
+    <li>A runtime's socket is root on its host: run the registrator where you would run root. For Docker, a read-only socket proxy can stand in front (<code>--socket tcp://proxy:2375</code>).</li>
+    <li>Whatever comes in is checked first - flags, the runtime's names, labels, ports and addresses, Consul's answers, the token file - and text from outside is cleaned before it reaches a log line.</li>
+    <li>The ACL token is never taken from the command line, and never logged.</li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    docker-consul-registrator - MIT licence. The image carries HashiCorp's Consul agent under its own licence (BUSL-1.1).
+  </div>
+</footer>
+
+</body>
+</html>

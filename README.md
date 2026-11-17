@@ -170,10 +170,15 @@ change), `--agent`, `--debug`.
 ## Building
 
 ```
-make check     # format, vet, tests with the race detector, golangci-lint, govulncheck
-make dist      # static Linux binaries, amd64 and arm64
-make image     # the container image
+make check       # format, vet, tests with the race detector, golangci-lint, govulncheck, the docs page
+make dist        # static Linux binaries, amd64 and arm64
+make image       # the container image
+make docs-serve  # the documentation page at http://127.0.0.1:8000
 ```
+
+The documentation page, [docs/index.html](docs/index.html), is one
+self-contained file. The Pages workflow checks it and publishes it on GitHub
+Pages whenever it changes on `main`.
 
 The image copies the Consul agent from HashiCorp's image, with its licence
 (BUSL-1.1).
